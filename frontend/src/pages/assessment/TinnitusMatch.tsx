@@ -66,7 +66,7 @@ const RI_MONITORING_PROMPT_INTERVAL_S = 10; // not defined elsewhere in this rep
  *  in this app (`CORE_SEQUENCE` in `assessment/Audiometry.tsx`), reused here
  *  as the existing frequency-set convention for Sound Tolerance rather than
  *  inventing a new one. */
-const ULL_FREQUENCIES = [250, 500, 1000, 2000, 4000, 8000];
+const ULL_FREQUENCIES = [500, 1000, 4000];
 /** No standardised ULL/LDL starting level exists elsewhere in this
  *  repository; this mirrors the ascending-search starting-level pattern
  *  already established for Masking Threshold and Loudness Match in this

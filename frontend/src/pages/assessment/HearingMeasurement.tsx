@@ -1412,7 +1412,7 @@ function MaskingModule({
               {t("hearing.masking.instructions3", "You do not need to adjust the volume yourself.")}
             </p>
             <div className="row row--end">
-              <button type="button" className="btn btn--primary btn--lg" onClick={() => setMScreen("stimulus_intro")}>
+              <button type="button" className="btn btn--primary btn--lg" onClick={() => beginFrequency(0)}>
                 {t("hearing.masking.startButton", "Start")}
               </button>
             </div>
