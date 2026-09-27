@@ -62,7 +62,7 @@ import {
 import Calibration, { type CalibrationResult } from "./assessment/Calibration";
 import Audiometry, { type AudiometryResult } from "./assessment/Audiometry";
 import TinnitusMatch, { type MatchResult } from "./assessment/TinnitusMatch";
-import AboutYourTinnitus from "./assessment/AboutYourTinnitus";
+import AboutYourTinnitus, { MODULE2_SECTIONS } from "./assessment/AboutYourTinnitus";
 import HearingMeasurement, {
   MASKING_FREQUENCIES,
   type HearingMeasurementResult,
@@ -337,6 +337,10 @@ export default function Assessment() {
     try {
       await saveModule({ device_profile: result, save_calibration: true }, ["calibration"]);
       setHearingPhase("audiometry");
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Headphone Calibration has been successfully completed. You may now proceed to Audiometry.",
+      });
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.calibrationFailed"), "crit");
     } finally {
@@ -369,6 +373,10 @@ export default function Assessment() {
       // Audiometry is the last part of the hearing step's *calibration* half;
       // the three measurement modules follow before the step is done.
       setHearingPhase("measurement");
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Audiometry assessment has been successfully completed. You may now proceed to Hearing Measurement.",
+      });
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.audiometryFailed"), "crit");
     } finally {
@@ -494,6 +502,13 @@ export default function Assessment() {
       // Only a genuinely completed section marks its module done — an
       // in-progress autosave must not make the section look finished.
       await saveModule(body, sectionStatus === "completed" ? [domainKey] : []);
+      if (sectionStatus === "completed") {
+        const sectionName = MODULE2_SECTIONS.find((s) => s.key === domainKey)?.instrumentAbbrev ?? domainKey;
+        setSubModuleModal({
+          title: "Sub-module Completed!",
+          message: `You have successfully completed the ${sectionName} questionnaire section.`,
+        });
+      }
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.answersFailed"), "crit");
       throw error;
@@ -545,6 +560,10 @@ export default function Assessment() {
       // server to derive the patient's tone from exactly these three modules.
       // Nothing is re-measured; the record it reads is the one just written.
       setHearingPhase("reference");
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Hearing Measurement sub-modules (Pitch, Loudness, Masking Profile) have been successfully completed.",
+      });
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       setFatal(error);
@@ -588,6 +607,10 @@ export default function Assessment() {
         ["reference_level"]
       );
       markDone("hearing", 3);
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Personalised Reference Level sub-module completed! Hearing Assessment step is complete.",
+      });
     } catch (error) {
       setFatal(error);
       toast(error instanceof ApiError ? error.message : t("assessment.toast.referenceFailed"), "crit");
@@ -640,6 +663,10 @@ export default function Assessment() {
       );
       setDoingOptional(false);
       await finalise();
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Module 3 (Psychoacoustic Characterisation) has been successfully completed!",
+      });
     } catch (error) {
       setFatal(error);
       toast(error instanceof ApiError ? error.message : t("assessment.toast.matchFailed"), "crit");
