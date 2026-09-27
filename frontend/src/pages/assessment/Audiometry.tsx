@@ -33,7 +33,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { engine } from "../../audio/engine";
 import { ThresholdTracker, shouldInsertCatchTrial, type Ear, type TrackerResult } from "../../audio/procedures";
-import { Audiogram } from "../../components/charts";
+import { Audiogram, CombinedAudiogramMasking } from "../../components/charts";
 import { Chip, Kbd, Panel, Readout, useHotkey } from "../../components/ui";
 import { IconCheck, IconPlay, IconStop } from "../../components/icons";
 // The audiometer's frequency and level controls reuse the assessment's own
@@ -181,23 +181,21 @@ function estimateStartLevel(
   return estimate ?? FALLBACK_DB_HL;
 }
 
-type Phase = "idle" | "presenting" | "gap" | "done";
+type Phase = "idle" | "countdown" | "presenting" | "gap" | "done";
 
 /**
  * The continuous-session layer wrapping the per-frequency `phase` above.
  *
  *  - `intro` — the start screen; nothing has played yet.
- *  - `active` — the test is running; frequencies auto-advance without a
- *    per-frequency Start press (see the tracker-rebuild effect below).
- *  - `paused` — the patient asked to pause; all audio and timers are
- *    stopped, exactly as they were before `phase` doubled as this state.
+ *  - `active` — the test is running; frequencies auto-advance with a 3-second
+ *    waiting period between tests.
+ *  - `earTransition` — interstitial screen after completing one ear, allowing
+ *    the patient to either proceed with the remaining ear or skip it.
+ *  - `paused` — the patient asked to pause; all audio and timers are stopped.
  *  - `confirmExit` — the Stop confirmation; testing is paused underneath it.
- *  - `complete` — every required measurement and reliability check is done;
- *    mirrors the old `phase === "done"`, kept as a distinct session phase so
- *    "done with this frequency" and "done with the whole session" are never
- *    the same value again.
+ *  - `complete` — required measurements finished (both ears or one completed ear).
  */
-type SessionPhase = "intro" | "active" | "paused" | "confirmExit" | "complete";
+type SessionPhase = "intro" | "active" | "earTransition" | "paused" | "confirmExit" | "complete";
 
 export interface AudiometryResult {
   audiogram: Record<Ear, Record<string, number>>;
@@ -216,35 +214,25 @@ export default function Audiometry({
   onProgress,
   onExit,
   initialAudiogram,
+  initialMaskingCurve,
 }: {
   onComplete(result: AudiometryResult): void;
   /**
    * Leave the hearing test without taking it.
-   *
-   * Distinct from the per-frequency Skip in the test controls, which drops one
-   * tone and carries on. This abandons the module: nothing is submitted, so no
-   * audiogram is written and `modules_done` does not gain `audiometry` — an
-   * assessment that skipped the test must not read as one that passed it.
    */
   onSkip?(): void;
   /**
    * Fires after every threshold actually established, with the audiogram as
    * it stands — a background autosave so a page reload or a later "Exit
-   * Test" resumes with nothing lost, distinct from `onComplete` in that it
-   * never implies the session is finished (the caller must not add
-   * `"audiometry"` to `modules_done` for this). Optional: a caller that does
-   * not wire it up simply gets no mid-session persistence, exactly the
-   * previous behaviour.
+   * Test" resumes with nothing lost.
    */
   onProgress?(audiogram: Record<Ear, Record<string, number>>): void;
   /**
-   * The patient chose "Exit Test" after starting — as opposed to `onSkip`,
-   * which is never taking the test at all, this preserves whatever was
-   * already measured (the same audiogram `onProgress` has been saving) but,
-   * like `onSkip`, must not be recorded as a completed module.
+   * The patient chose "Exit Test" after starting.
    */
   onExit?(audiogram: Record<Ear, Record<string, number>>): void;
   initialAudiogram?: Record<string, Record<string, number>>;
+  initialMaskingCurve?: { hz: number; threshold_db: number | null; masked: boolean | null; tested: boolean }[];
 }) {
   const { t } = useTranslation();
   const resumed = useRef(
@@ -273,6 +261,10 @@ export default function Audiometry({
    */
   const [mode, setMode] = useState<"guided" | "manual">("guided");
   const [phase, setPhase] = useState<Phase>("idle");
+  // 3-second countdown waiting period before each frequency test
+  const [countdown, setCountdown] = useState<number>(3);
+  const [skippedEar, setSkippedEar] = useState<Ear | null>(null);
+  const [chartMode, setChartMode] = useState<"audiogram" | "combined">("combined");
   // The continuous-session layer. A resumed session (existing thresholds on
   // file) opens straight onto the intro screen like any other — resuming
   // still gets a deliberate "Start" press before any audio plays, rather
@@ -343,17 +335,6 @@ export default function Audiometry({
     let sideThresholds = audiogram[ear];
     if (result.thresholdDbHl !== null) {
       sideThresholds = { ...sideThresholds, [String(freq)]: result.thresholdDbHl };
-      // Merged from `prev`, not from the closure's copy of `audiogram`.
-      //
-      // `sideThresholds` is still needed below for the inter-octave decision,
-      // which wants the thresholds *including* the one just measured. But using
-      // it as the new state would overwrite this ear's whole map with whatever
-      // the closure captured — and this runs from a `setTimeout` chain, so the
-      // closure is one the scheduler is holding rather than necessarily the
-      // latest. It happens to be current today because the operator presses
-      // Start once per frequency, which rebuilds the chain each time; it would
-      // silently start dropping thresholds the moment the test auto-advanced.
-      // Merging costs nothing and does not depend on that remaining true.
       setAudiogram((prev) => ({
         ...prev,
         [ear]: { ...(prev[ear] ?? {}), [String(freq)]: result.thresholdDbHl as number },
@@ -381,13 +362,17 @@ export default function Audiometry({
     if (stepIndex < totalForEar - 1) {
       setStepIndex((i) => i + 1);
     } else if (ear === "right") {
-      setEar("left");
-      setStepIndex(0);
+      // Right ear finished! Stop audio and transition to ear screen,
+      // giving the patient the option to test the left ear or skip it.
+      clearTimers();
+      engine.stopAll(0.05);
+      setPhase("idle");
+      setSessionPhase("earTransition");
     } else {
       setPhase("done");
       setSessionPhase("complete");
     }
-  }, [audiogram, ear, extraFreqs, freq, stepIndex]);
+  }, [audiogram, clearTimers, ear, extraFreqs, freq, stepIndex]);
 
   /** Present one stimulus (or a silent catch trial) and open the response window. */
   const present = useCallback(async () => {
@@ -450,15 +435,31 @@ export default function Audiometry({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audiogram]);
 
-  /** Auto-advance: once the tracker-rebuild effect above has reset `phase` to
-   *  `idle` for a new frequency, start presenting immediately — the whole
-   *  point of a continuous session. Does nothing while paused, exiting, or
-   *  on the intro screen; `present()` guards `tracker.current` itself, so
-   *  this is safe to fire on every phase/session-phase change. */
+  /** Auto-advance with 3-second waiting time: once the tracker-rebuild effect
+   *  has reset `phase` to `idle` for a new frequency, initiate the 3-second countdown. */
   useEffect(() => {
-    if (sessionPhase === "active" && phase === "idle") void present();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (sessionPhase === "active" && phase === "idle") {
+      setCountdown(3);
+      setPhase("countdown");
+    }
   }, [sessionPhase, phase]);
+
+  /** 3-second countdown timer for each frequency test. */
+  useEffect(() => {
+    if (sessionPhase !== "active" || phase !== "countdown") return;
+
+    if (countdown > 0) {
+      const timer = window.setTimeout(() => {
+        setCountdown((c) => c - 1);
+      }, 1000);
+      timers.current.push(timer);
+      return () => {
+        window.clearTimeout(timer);
+      };
+    } else {
+      void present();
+    }
+  }, [sessionPhase, phase, countdown, present]);
 
   const respond = useCallback(() => {
     if (phase !== "presenting" || respondedRef.current) return;
@@ -469,33 +470,56 @@ export default function Audiometry({
   useHotkey(" ", respond, "I heard it", phase === "presenting");
   useHotkey("enter", respond, "I heard it", phase === "presenting");
 
-  /** The intro screen's single "Start Hearing Test" press — the only manual
-   *  Start in the whole session from here on; every later frequency
-   *  auto-presents via the effect above once `sessionPhase` is `active`. */
+  /** The intro screen's single "Start Hearing Test" press — starts with 3-second countdown. */
   function start() {
     clearTimers();
+    setCountdown(3);
+    setPhase("countdown");
     setSessionPhase("active");
-    void present();
   }
 
-  /** Pause: stop all audio and timers immediately, exactly as the original
-   *  per-frequency "Pause" always has, and show the paused screen rather
-   *  than silently returning to what used to be indistinguishable from it —
-   *  the old per-frequency "waiting for Start" idle state this replaces. */
+  /** Pause: stop all audio and timers immediately. */
   function pause() {
     clearTimers();
     engine.stopAll(0.05);
-    setPhase("idle");
     setSessionPhase("paused");
   }
 
-  /** Resume: the tracker for the current frequency was never torn down —
-   *  only its presentation timers were cleared — so this continues the same
-   *  bracket search rather than restarting the frequency. The auto-advance
-   *  effect calls `present()` once `sessionPhase` flips back to `active`. */
+  /** Resume: continues testing. If paused during countdown, resumes 3s countdown. */
   function resumeSession() {
     setSessionPhase("active");
+    if (phase === "countdown") {
+      setCountdown((c) => (c > 0 ? c : 3));
+    } else if (phase === "idle") {
+      setCountdown(3);
+      setPhase("countdown");
+    }
   }
+
+  /** Advance to next ear (left ear) with 3-second countdown. */
+  function startNextEar() {
+    clearTimers();
+    engine.stopAll(0.05);
+    setEar("left");
+    setStepIndex(0);
+    setCountdown(3);
+    setPhase("countdown");
+    setSessionPhase("active");
+  }
+
+  /** Allow skipping the remaining ear and completing with the finished ear's data. */
+  function skipRemainingEar() {
+    clearTimers();
+    engine.stopAll(0.05);
+    const skipped = ear === "right" ? "left" : ear;
+    setSkippedEar(skipped);
+    setPhase("done");
+    setSessionPhase("complete");
+  }
+
+  const canSkipRemainingEar =
+    (ear === "left" && Object.keys(audiogram.right ?? {}).length > 0) ||
+    (ear === "right" && Object.keys(audiogram.left ?? {}).length > 0);
 
   /** The Stop control during active testing — pauses underneath the "Stop
    *  Hearing Test?" confirmation rather than leaving audio running behind it. */
@@ -616,6 +640,12 @@ export default function Audiometry({
         : t("audiometry.notes.interOctaveNone", { gap: INTER_OCTAVE_GAP_DB })
     );
 
+    if (skippedEar === "left" || (Object.keys(audiogram.right ?? {}).length > 0 && Object.keys(audiogram.left ?? {}).length === 0)) {
+      notes.push(t("audiometry.notes.skippedLeftEar", { defaultValue: "Left ear skipped by user — right ear assessment completed." }));
+    } else if (skippedEar === "right" || (Object.keys(audiogram.left ?? {}).length > 0 && Object.keys(audiogram.right ?? {}).length === 0)) {
+      notes.push(t("audiometry.notes.skippedRightEar", { defaultValue: "Right ear skipped by user — left ear assessment completed." }));
+    }
+
     onComplete({
       audiogram,
       results,
@@ -713,6 +743,14 @@ export default function Audiometry({
         />
       ) : sessionPhase === "intro" ? (
         <IntroScreen resuming={!!resumed} onStart={start} onSkip={onSkip} />
+      ) : sessionPhase === "earTransition" ? (
+        <EarTransitionScreen
+          completedEar={ear === "left" ? "right" : "left"}
+          nextEar={ear}
+          measuredCount={Object.keys(audiogram[ear === "left" ? "right" : "left"] ?? {}).length}
+          onContinue={startNextEar}
+          onSkipRemaining={skipRemainingEar}
+        />
       ) : sessionPhase === "paused" ? (
         <PausedScreen onResume={resumeSession} onExitConfirm={openExitConfirm} />
       ) : sessionPhase === "confirmExit" ? (
@@ -736,6 +774,11 @@ export default function Audiometry({
               {sessionPhase === "active" && isInterOctave && (
                 <Chip tone="warn" title={t("audiometry.interOctaveTitle", { gap: INTER_OCTAVE_GAP_DB })}>
                   {t("audiometry.extraFrequency")}
+                </Chip>
+              )}
+              {phase === "countdown" && (
+                <Chip tone="warn" live>
+                  {t("audiometry.startingInChip", { count: countdown, defaultValue: `Waiting… ${countdown}s` })}
                 </Chip>
               )}
               {phase === "presenting" && !isCatchTrial && (
@@ -774,11 +817,62 @@ export default function Audiometry({
               />
             </div>
 
-            {/* The only moment nothing is playing during an active session:
-                the brief gap while the tracker rebuilds for the next
-                frequency, before the auto-advance effect calls `present()`.
-                No button here any more — that effect is the trigger now,
-                not a patient click, which is the whole point of "continuous". */}
+            {/* 3-second waiting time display before test tones begin */}
+            {phase === "countdown" && (
+              <div className="stack stack-3 center" style={{ minHeight: 140, paddingBlock: "var(--s2)" }}>
+                <div
+                  style={{
+                    width: 60,
+                    height: 60,
+                    borderRadius: "50%",
+                    border: "3px solid var(--signal)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    marginInline: "auto",
+                    background: "var(--paper-sunken)",
+                    boxShadow: "0 0 16px var(--signal-glow, rgba(0, 180, 216, 0.25))",
+                  }}
+                >
+                  <span className="mono" style={{ fontSize: "1.9rem", fontWeight: 800, color: "var(--signal-ink)" }}>
+                    {countdown > 0 ? countdown : 1}
+                  </span>
+                </div>
+                <div className="stack stack-1">
+                  <span className="label center" style={{ fontSize: "var(--fs-body)", color: "var(--ink-1)" }}>
+                    {t("audiometry.waitingCountdown", {
+                      count: countdown,
+                      defaultValue: `Next test starts in ${countdown} second${countdown === 1 ? "" : "s"}…`,
+                    })}
+                  </span>
+                  <span className="meta center dim">
+                    {t("audiometry.getReadyNote", { defaultValue: "Listen carefully for the tone" })}
+                  </span>
+                </div>
+                <div className="row" style={{ justifyContent: "center", marginTop: "var(--s1)" }}>
+                  <button type="button" className="btn btn--sm btn--ghost" onClick={pause}>
+                    {t("audiometry.pause")}
+                  </button>
+                  <button type="button" className="btn btn--sm btn--ghost" onClick={skipFrequency}>
+                    {t("audiometry.skipFrequency")}
+                  </button>
+                  {canSkipRemainingEar && (
+                    <button
+                      type="button"
+                      className="btn btn--sm btn--ghost"
+                      onClick={skipRemainingEar}
+                      title={t("audiometry.skipRemainingEarHint", "Complete test with finished ear only")}
+                    >
+                      {t("audiometry.skipRemainingEar", ear === "left" ? "Skip Left Ear" : "Skip Right Ear")}
+                    </button>
+                  )}
+                  <button type="button" className="btn btn--sm btn--ghost" onClick={openExitConfirm}>
+                    {t("audiometry.stopTest", { defaultValue: "Stop" })}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {phase === "idle" && (
               <div className="stack stack-2" style={{ minHeight: 78 }}>
                 <span className="meta" aria-live="polite">
@@ -824,6 +918,16 @@ export default function Audiometry({
                   <button type="button" className="btn btn--sm btn--ghost" onClick={skipFrequency}>
                     {t("audiometry.skipFrequency")}
                   </button>
+                  {canSkipRemainingEar && (
+                    <button
+                      type="button"
+                      className="btn btn--sm btn--ghost"
+                      onClick={skipRemainingEar}
+                      title={t("audiometry.skipRemainingEarHint", "Complete test with finished ear only")}
+                    >
+                      {t("audiometry.skipRemainingEar", ear === "left" ? "Skip Left Ear" : "Skip Right Ear")}
+                    </button>
+                  )}
                   <button type="button" className="btn btn--sm btn--ghost" onClick={openExitConfirm}>
                     {t("audiometry.stopTest", { defaultValue: "Stop" })}
                   </button>
@@ -909,7 +1013,41 @@ export default function Audiometry({
           </Panel>
 
           <Panel title={t("audiometry.liveAudiogram")} tight headPlain>
-            <Audiogram audiogram={audiogram} height={280} showLegend />
+            {initialMaskingCurve && initialMaskingCurve.length > 0 ? (
+              <div className="stack stack-2">
+                <div className="row row--between row--baseline" style={{ marginBottom: "var(--s2)" }}>
+                  <span className="meta">{t("audiometry.chartView", { defaultValue: "Pattern View" })}</span>
+                  <div className="btn-group">
+                    <button
+                      type="button"
+                      className={`btn btn--micro${chartMode === "combined" ? " btn--primary" : " btn--ghost"}`}
+                      onClick={() => setChartMode("combined")}
+                    >
+                      {t("audiometry.viewCombined", { defaultValue: "Combined" })}
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn--micro${chartMode === "audiogram" ? " btn--primary" : " btn--ghost"}`}
+                      onClick={() => setChartMode("audiogram")}
+                    >
+                      {t("audiometry.viewAudiogramOnly", { defaultValue: "Audiogram" })}
+                    </button>
+                  </div>
+                </div>
+                {chartMode === "combined" ? (
+                  <CombinedAudiogramMasking
+                    audiogram={audiogram}
+                    curve={initialMaskingCurve}
+                    height={280}
+                    showLegend
+                  />
+                ) : (
+                  <Audiogram audiogram={audiogram} height={280} showLegend />
+                )}
+              </div>
+            ) : (
+              <Audiogram audiogram={audiogram} height={280} showLegend />
+            )}
           </Panel>
 
           <Panel title={t("audiometry.reliability")} tight headPlain>
@@ -1084,6 +1222,67 @@ function ConfirmExitScreen({ onContinue, onExit }: { onContinue(): void; onExit(
           </button>
           <button type="button" className="btn btn--ghost" onClick={onExit}>
             {t("audiometry.exitTest", { defaultValue: "Exit Test" })}
+          </button>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function EarTransitionScreen({
+  completedEar,
+  nextEar,
+  measuredCount,
+  onContinue,
+  onSkipRemaining,
+}: {
+  completedEar: Ear;
+  nextEar: Ear;
+  measuredCount: number;
+  onContinue(): void;
+  onSkipRemaining(): void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Panel bracketed tone="signal">
+      <div className="center stack stack-5" style={{ paddingBlock: "var(--s6)" }}>
+        <div className="stack stack-3" style={{ maxWidth: "36em", marginInline: "auto", textAlign: "center" }}>
+          <div className="center">
+            <Chip tone="ok" dot>
+              {completedEar === "right"
+                ? t("audiometry.rightEarDone", { defaultValue: "Right ear complete" })
+                : t("audiometry.leftEarDone", { defaultValue: "Left ear complete" })}
+            </Chip>
+          </div>
+          <h2 style={{ margin: 0 }}>
+            {completedEar === "right"
+              ? t("audiometry.rightEarCompleteTitle", { defaultValue: "Right Ear Test Complete" })
+              : t("audiometry.leftEarCompleteTitle", { defaultValue: "Left Ear Test Complete" })}
+          </h2>
+          <p style={{ fontSize: "var(--fs-body)", lineHeight: 1.6 }}>
+            {t("audiometry.earTransitionBody", {
+              completed: completedEar === "right" ? "right" : "left",
+              next: nextEar === "left" ? "left" : "right",
+              count: measuredCount,
+              defaultValue: `You have completed ${measuredCount} frequencies for the ${completedEar} ear. You can now test the ${nextEar} ear, or skip it to finalize your hearing assessment with this ear.`,
+            })}
+          </p>
+          <p className="meta">
+            {t("audiometry.skipRemainingNote", {
+              defaultValue: "Skipping the remaining ear will complete the hearing test using your finished ear's audiogram.",
+            })}
+          </p>
+        </div>
+        <div className="row row--tight" style={{ justifyContent: "center" }}>
+          <button type="button" className="btn btn--primary btn--lg" onClick={onContinue}>
+            {nextEar === "left"
+              ? t("audiometry.continueToLeftEar", { defaultValue: "Continue to Left Ear" })
+              : t("audiometry.continueToRightEar", { defaultValue: "Continue to Right Ear" })}
+          </button>
+          <button type="button" className="btn btn--ghost btn--lg" onClick={onSkipRemaining}>
+            {nextEar === "left"
+              ? t("audiometry.skipLeftEarFinish", { defaultValue: "Skip Left Ear & Finish Test" })
+              : t("audiometry.skipRightEarFinish", { defaultValue: "Skip Right Ear & Finish Test" })}
           </button>
         </div>
       </div>

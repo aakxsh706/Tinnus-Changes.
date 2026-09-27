@@ -35,8 +35,8 @@ import {
   type PitchAFCResponse,
   type PitchAFCTrial,
 } from "../../audio/procedures";
-import { Chip, OptionGroup, Panel, Readout, StepRail } from "../../components/ui";
-import { MaskingCurve } from "../../components/charts";
+import { Chip, Modal, OptionGroup, Panel, Readout, StepRail } from "../../components/ui";
+import { CombinedAudiogramMasking, MaskingCurve } from "../../components/charts";
 import { IconCheck, IconPlay, IconStop } from "../../components/icons";
 
 /* ------------------------------------------------------------------------- */
@@ -239,7 +239,7 @@ export interface HearingMeasurementResult {
  * backend's `curve()` builder already plot the union of whatever was tested
  * with this preset list, never just this list alone.
  */
-const MASKING_FREQUENCIES = [1000, 2000, 3000, 4000, 5000, 6000, 8000];
+const MASKING_FREQUENCIES = [250, 500, 1000, 2000, 3000, 4000, 6000, 8000];
 
 type Module = "pitch" | "loudness" | "masking";
 
@@ -247,12 +247,14 @@ export default function HearingMeasurement({
   onComplete,
   initial,
   laterality,
+  audiogram,
 }: {
   onComplete(result: HearingMeasurementResult): void;
   initial?: Partial<HearingMeasurementResult>;
   /** Seeds the pitch-match location screen's default selection — the patient
    *  confirms or changes it there rather than it being asked only once. */
   laterality?: string | null;
+  audiogram?: Record<string, Record<string, number>> | null;
 }) {
   const { t } = useTranslation();
   const [module, setModule] = useState<Module>("pitch");
@@ -389,6 +391,7 @@ export default function HearingMeasurement({
             setMaskingOutcome(outcome);
             finish(outcome);
           }}
+          audiogram={audiogram}
         />
       )}
     </div>
@@ -440,14 +443,68 @@ function PitchModule({
   const [pmConfirmation, setPmConfirmation] = useState<PitchConfirmation>(existingOutcome?.confirmation ?? "");
   const [matchedHz, setMatchedHz] = useState<number | null>(existingOutcome?.hz ?? null);
 
-  const narrower = useRef(new PitchNarrower());
+  const narrower = useRef(new PitchNarrower(2400));
   const [pair, setPair] = useState(() => narrower.current.pair());
   const comparisonLevel = pmComfortLevel ?? pmLevelDraft;
 
-  async function playProbe(hz: number, dbHL: number, ms = 1600) {
+  const [activeProbe, setActiveProbe] = useState<string | null>(null);
+  const [probeCountdown, setProbeCountdown] = useState<number>(10);
+  const probeTimerRef = useRef<number | null>(null);
+  const replayTimeoutRef = useRef<number | null>(null);
+
+  function clearProbeTimers() {
+    if (probeTimerRef.current !== null) {
+      window.clearInterval(probeTimerRef.current);
+      probeTimerRef.current = null;
+    }
+    if (replayTimeoutRef.current !== null) {
+      window.clearTimeout(replayTimeoutRef.current);
+      replayTimeoutRef.current = null;
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      clearProbeTimers();
+    };
+  }, []);
+
+  async function playProbe(hz: number, dbHL: number, ms = 10000, label = "probe") {
     await engine.resume();
+    clearProbeTimers();
     stopSound();
+    setActiveProbe(label);
+    const totalSecs = Math.max(1, Math.round(ms / 1000));
+    setProbeCountdown(totalSecs);
+
     handleRef.current = engine.playTone({ freq: hz, dbHL, ear: "both", durationMs: ms, rampMs: 30 });
+
+    const startTime = Date.now();
+    probeTimerRef.current = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const remaining = Math.max(0, totalSecs - elapsed);
+      setProbeCountdown(remaining);
+      if (remaining <= 0) {
+        clearProbeTimers();
+        setActiveProbe(null);
+      }
+    }, 250);
+  }
+
+  function handleStop() {
+    clearProbeTimers();
+    setActiveProbe(null);
+    stopSound();
+  }
+
+  function replayBoth(fA: number, fB: number) {
+    clearProbeTimers();
+    // Play Sound A for 10-second interval
+    void playProbe(fA, comparisonLevel, 10000, "A");
+    // After 10-second interval, play Sound B for 10-second interval
+    replayTimeoutRef.current = window.setTimeout(() => {
+      void playProbe(fB, comparisonLevel, 10000, "B");
+    }, 10000);
   }
 
   function confirmComfortLevel() {
@@ -455,6 +512,9 @@ function PitchModule({
   }
 
   function respond(response: PitchAFCResponse) {
+    clearProbeTimers();
+    setActiveProbe(null);
+    stopSound();
     narrower.current.choose(response);
     setPair(narrower.current.pair());
     if (narrower.current.done) {
@@ -464,23 +524,31 @@ function PitchModule({
   }
 
   function chooseOctave(response: OctaveResponse) {
+    clearProbeTimers();
+    setActiveProbe(null);
+    stopSound();
     setPmOctaveResponse(response);
     const bracketed = narrower.current.result();
-    // Same octave-confusion convention used elsewhere in this app: a patient
-    // who says the octave-higher tone is closer is corrected to that
-    // frequency. "Not Sure" gives no evidence either way, so it keeps the
-    // bracketed value rather than guessing which octave is right.
-    if (response === "octave_higher") setMatchedHz(bracketed * 2);
+    // Octave A and B uses 1.50 as specified: Sound B is 1.50x the matched pitch.
+    if (response === "octave_higher") {
+      setMatchedHz(Math.min(16000, PitchNarrower.snap(bracketed * 1.50)));
+    }
     setPmScreen("confirm");
   }
 
   function confirmResult(confirmation: PitchConfirmation) {
+    clearProbeTimers();
+    setActiveProbe(null);
+    stopSound();
     setPmConfirmation(confirmation);
     setPmScreen("result");
   }
 
   function repeatPitchMatching() {
-    narrower.current = new PitchNarrower();
+    clearProbeTimers();
+    setActiveProbe(null);
+    stopSound();
+    narrower.current = new PitchNarrower(2400);
     setPair(narrower.current.pair());
     setMatchedHz(null);
     setPmOctaveResponse("");
@@ -502,7 +570,7 @@ function PitchModule({
       initialLevelDb: pmInitialLevel,
       comfortLevelDb: pmComfortLevel,
       notSureCount: narrower.current.notSureTotal,
-      octaveFrequencyHz: pmOctaveResponse ? Math.round(narrower.current.result() * 2) : null,
+      octaveFrequencyHz: pmOctaveResponse ? Math.min(16000, Math.round(narrower.current.result() * 1.50)) : null,
       octaveResponse: pmOctaveResponse,
       confirmation: pmConfirmation,
       repeated: pmRepeated,
@@ -600,12 +668,14 @@ function PitchModule({
               <button
                 type="button"
                 className="btn btn--primary"
-                onClick={() => playProbe(1000, pmComfortLevel ?? pmLevelDraft, 1800)}
+                onClick={() => playProbe(1000, pmComfortLevel ?? pmLevelDraft, 10000, "comfort")}
               >
                 <IconPlay size={15} />
-                {t("hearing.pitch.playTestSound", "Play Test Sound")}
+                {activeProbe === "comfort"
+                  ? `${t("hearing.pitch.playTestSound", "Play Test Sound")} (${probeCountdown}s)`
+                  : `${t("hearing.pitch.playTestSound", "Play Test Sound")} (10s)`}
               </button>
-              <button type="button" className="btn btn--ghost" onClick={stopSound}>
+              <button type="button" className="btn btn--ghost" onClick={handleStop}>
                 <IconStop size={15} />
                 {t("hearing.pitch.stop")}
               </button>
@@ -661,14 +731,19 @@ function PitchModule({
           </div>
         )}
 
-        {/* -- screens 5-7 · 2AFC comparison (coarse, then fine) ------------- */}
+        {/* -- screens 5-7 · 2AFC comparison (10-second intervals, 1 semitone stop) ------------- */}
         {pmScreen === "compare" && (
           <div className="stack stack-5">
-            <span className="label label--signal">
-              {narrower.current.phase === "fine"
-                ? t("hearing.pitch.fineTitle", "Fine-tuning your pitch match")
-                : t("hearing.pitch.title", "Tinnitus Pitch Matching")}
-            </span>
+            <div className="row row--between row--wrap">
+              <span className="label label--signal">
+                {narrower.current.phase === "fine"
+                  ? t("hearing.pitch.fineTitle", "Fine-tuning your pitch match")
+                  : t("hearing.pitch.title", "Tinnitus Pitch Matching")}
+              </span>
+              <Chip tone="ok">
+                {`Difference: ${narrower.current.gapSemitones()} semitone(s) · stops at ≤ 1 semitone`}
+              </Chip>
+            </div>
             {narrower.current.phase === "fine" && (
               <p style={{ fontSize: "var(--fs-small)", maxWidth: "46em" }}>
                 {t(
@@ -678,7 +753,11 @@ function PitchModule({
               </p>
             )}
 
-            <Chip tone="ghost">{t("hearing.stimulus.pureTone")}</Chip>
+            <div className="row row--tight row--wrap">
+              <Chip tone="ghost">{t("hearing.stimulus.pureTone")}</Chip>
+              <Chip tone="info">10-second intervals</Chip>
+              <Chip tone="data">Octave A & B: 1.50× (Divisible by 10)</Chip>
+            </div>
 
             <div className="grid grid-2">
               {(
@@ -686,32 +765,59 @@ function PitchModule({
                   { hz: pair.aHz, key: "A" },
                   { hz: pair.bHz, key: "B" },
                 ] as const
-              ).map((option) => (
-                <Panel key={option.key} tone="sunken" tight>
-                  <div className="stack stack-3 center">
-                    <span className="label">{option.key}</span>
-                    <button type="button" className="btn btn--block" onClick={() => playProbe(option.hz, comparisonLevel)}>
-                      <IconPlay size={15} />
-                      {t("hearing.pitch.playSound", { key: option.key, defaultValue: `Play Sound ${option.key}` })}
-                    </button>
-                    <span className="meta">{t("hearing.pitch.comparisonFrequency", "Comparison frequency")}</span>
-                    <Readout label="" value={(option.hz / 1000).toFixed(2)} unit="kHz" size="md" tone="data" note={`${option.hz} Hz`} />
-                  </div>
-                </Panel>
-              ))}
+              ).map((option) => {
+                const isPlaying = activeProbe === option.key;
+                return (
+                  <Panel key={option.key} tone={isPlaying ? "ok" : "sunken"} tight>
+                    <div className="stack stack-3 center">
+                      <span className="label">{option.key}</span>
+                      <button
+                        type="button"
+                        className={`btn btn--block ${isPlaying ? "btn--primary" : ""}`}
+                        onClick={() => {
+                          if (isPlaying) {
+                            handleStop();
+                          } else {
+                            void playProbe(option.hz, comparisonLevel, 10000, option.key);
+                          }
+                        }}
+                      >
+                        {isPlaying ? <IconStop size={15} /> : <IconPlay size={15} />}
+                        {isPlaying
+                          ? `Stop Sound ${option.key} (${probeCountdown}s)`
+                          : `Play Sound ${option.key} (10s)`}
+                      </button>
+                      <span className="meta">{t("hearing.pitch.comparisonFrequency", "Comparison frequency")}</span>
+                      <Readout label="" value={(option.hz / 1000).toFixed(2)} unit="kHz" size="md" tone="data" note={`${option.hz} Hz`} />
+                    </div>
+                  </Panel>
+                );
+              })}
             </div>
 
-            <div className="row row--end">
-              <button
-                type="button"
-                className="btn btn--sm btn--ghost"
-                onClick={() => {
-                  playProbe(pair.aHz, comparisonLevel);
-                  window.setTimeout(() => playProbe(pair.bHz, comparisonLevel), 900);
-                }}
-              >
-                {t("hearing.pitch.replayBoth", "↻ Replay Both")}
-              </button>
+            <div className="row row--between row--wrap">
+              <span className="meta">
+                {activeProbe && (
+                  <Chip tone="signal" live>
+                    {`Playing ${activeProbe === "A" ? "Sound A" : activeProbe === "B" ? "Sound B" : "Sound"} · ${probeCountdown}s remaining`}
+                  </Chip>
+                )}
+              </span>
+              <div className="row row--tight">
+                {activeProbe && (
+                  <button type="button" className="btn btn--sm btn--ghost" onClick={handleStop}>
+                    <IconStop size={13} />
+                    {t("hearing.pitch.stop", "Stop")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn--sm btn--ghost"
+                  onClick={() => replayBoth(pair.aHz, pair.bHz)}
+                >
+                  {t("hearing.pitch.replayBoth", "↻ Replay Both (10s intervals)")}
+                </button>
+              </div>
             </div>
 
             <span className="label">{t("hearing.pitch.closerQuestion", "Which sound is closer to your tinnitus?")}</span>
@@ -727,69 +833,111 @@ function PitchModule({
               </button>
             </div>
 
-            <span className="meta">
-              {t("hearing.pitch.trialInfo", {
-                trial: narrower.current.trace.length + 1,
-                defaultValue: `Trial ${narrower.current.trace.length + 1}`,
-              })}
-            </span>
+            <div className="row row--between">
+              <span className="meta">
+                {t("hearing.pitch.trialInfo", {
+                  trial: narrower.current.trace.length + 1,
+                  defaultValue: `Trial ${narrower.current.trace.length + 1}`,
+                })}
+              </span>
+              <span className="meta" style={{ color: "var(--ink-secondary)" }}>
+                {`Difference: ${narrower.current.gapSemitones()} semitones · stops once ≤ 1 semitone`}
+              </span>
+            </div>
           </div>
         )}
 
-        {/* -- screen 8 · one-octave verification ---------------------------- */}
+        {/* -- screen 8 · octave verification (1.50 ratio as specified) ------- */}
         {pmScreen === "octave" && matchedHz !== null && (
           <div className="stack stack-5">
-            <span className="label label--signal">{t("hearing.pitch.octaveCheckTitle", "Final Pitch Check")}</span>
+            <span className="label label--signal">{t("hearing.pitch.octaveCheckTitle", "Final Pitch Check (1.50× Comparison)")}</span>
             <p style={{ fontSize: "var(--fs-small)", maxWidth: "46em" }}>
               {t(
                 "hearing.pitch.octaveCheckInstruction",
-                "We will compare your matched sound with a sound one octave higher. Listen to both and choose the one that is closer to your tinnitus."
+                "We will compare your matched sound (Sound A) with Sound B (1.50× frequency). Listen to both and choose the one that is closer to your tinnitus."
               )}
             </p>
 
             <div className="grid grid-2">
-              <Panel tone="sunken" tight>
+              <Panel tone={activeProbe === "octave_A" ? "ok" : "sunken"} tight>
                 <div className="stack stack-3 center">
                   <span className="label">{t("hearing.pitch.soundALabel", "SOUND A")}</span>
                   <span className="meta">{t("hearing.pitch.yourMatchedPitch", "Your matched pitch")}</span>
-                  <button type="button" className="btn btn--block" onClick={() => playProbe(matchedHz, comparisonLevel)}>
-                    <IconPlay size={15} />
-                    {t("hearing.pitch.playA", "Play A")}
+                  <button
+                    type="button"
+                    className={`btn btn--block ${activeProbe === "octave_A" ? "btn--primary" : ""}`}
+                    onClick={() => {
+                      if (activeProbe === "octave_A") {
+                        handleStop();
+                      } else {
+                        void playProbe(matchedHz, comparisonLevel, 10000, "octave_A");
+                      }
+                    }}
+                  >
+                    {activeProbe === "octave_A" ? <IconStop size={15} /> : <IconPlay size={15} />}
+                    {activeProbe === "octave_A"
+                      ? `Stop Sound A (${probeCountdown}s)`
+                      : `${t("hearing.pitch.playA", "Play A")} (10s)`}
                   </button>
                   <Readout label={t("hearing.pitch.matchedFrequency", "Matched frequency")} value={(matchedHz / 1000).toFixed(2)} unit="kHz" size="sm" tone="data" note={`${matchedHz} Hz`} />
                 </div>
               </Panel>
-              <Panel tone="sunken" tight>
+              <Panel tone={activeProbe === "octave_B" ? "ok" : "sunken"} tight>
                 <div className="stack stack-3 center">
                   <span className="label">{t("hearing.pitch.soundBLabel", "SOUND B")}</span>
-                  <span className="meta">{t("hearing.pitch.oneOctaveHigher", "One octave higher")}</span>
-                  <button type="button" className="btn btn--block" onClick={() => playProbe(matchedHz * 2, comparisonLevel)}>
-                    <IconPlay size={15} />
-                    {t("hearing.pitch.playB", "Play B")}
+                  <span className="meta">{t("hearing.pitch.onePointFiveHigher", "Sound B: 1.50× frequency")}</span>
+                  <button
+                    type="button"
+                    className={`btn btn--block ${activeProbe === "octave_B" ? "btn--primary" : ""}`}
+                    onClick={() => {
+                      const freqB = Math.min(16000, PitchNarrower.snap(matchedHz * 1.50));
+                      if (activeProbe === "octave_B") {
+                        handleStop();
+                      } else {
+                        void playProbe(freqB, comparisonLevel, 10000, "octave_B");
+                      }
+                    }}
+                  >
+                    {activeProbe === "octave_B" ? <IconStop size={15} /> : <IconPlay size={15} />}
+                    {activeProbe === "octave_B"
+                      ? `Stop Sound B (${probeCountdown}s)`
+                      : `${t("hearing.pitch.playB", "Play B")} (10s)`}
                   </button>
                   <Readout
-                    label={t("hearing.pitch.matchedFrequencyTimesTwo", "Matched frequency × 2")}
-                    value={((matchedHz * 2) / 1000).toFixed(2)}
+                    label={t("hearing.pitch.matchedFrequencyTimesOnePointFive", "Matched frequency × 1.50")}
+                    value={((Math.min(16000, PitchNarrower.snap(matchedHz * 1.50))) / 1000).toFixed(2)}
                     unit="kHz"
                     size="sm"
                     tone="data"
-                    note={`${matchedHz * 2} Hz`}
+                    note={`${Math.min(16000, PitchNarrower.snap(matchedHz * 1.50))} Hz`}
                   />
                 </div>
               </Panel>
             </div>
 
-            <div className="row row--end">
-              <button
-                type="button"
-                className="btn btn--sm btn--ghost"
-                onClick={() => {
-                  playProbe(matchedHz, comparisonLevel);
-                  window.setTimeout(() => playProbe(matchedHz * 2, comparisonLevel), 900);
-                }}
-              >
-                {t("hearing.pitch.replayBoth", "↻ Replay Both")}
-              </button>
+            <div className="row row--between row--wrap">
+              <span className="meta">
+                {activeProbe && (
+                  <Chip tone="signal" live>
+                    {`Playing ${activeProbe === "octave_A" ? "Sound A" : "Sound B (1.50×)"} · ${probeCountdown}s remaining`}
+                  </Chip>
+                )}
+              </span>
+              <div className="row row--tight">
+                {activeProbe && (
+                  <button type="button" className="btn btn--sm btn--ghost" onClick={handleStop}>
+                    <IconStop size={13} />
+                    {t("hearing.pitch.stop", "Stop")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn--sm btn--ghost"
+                  onClick={() => replayBoth(matchedHz, Math.min(16000, PitchNarrower.snap(matchedHz * 1.50)))}
+                >
+                  {t("hearing.pitch.replayBoth", "↻ Replay Both (10s intervals)")}
+                </button>
+              </div>
             </div>
 
             <span className="label">{t("hearing.pitch.closerQuestion", "Which sound is closer to your tinnitus?")}</span>
@@ -798,7 +946,7 @@ function PitchModule({
                 {t("hearing.pitch.matchedPitchOption", "Matched Pitch")}
               </button>
               <button type="button" className="btn btn--primary btn--lg" onClick={() => chooseOctave("octave_higher")}>
-                {t("hearing.pitch.octaveHigherOption", "One Octave Higher")}
+                {t("hearing.pitch.octaveHigherOption", "Sound B (1.50×)")}
               </button>
               <button type="button" className="btn btn--lg" onClick={() => chooseOctave("not_sure")}>
                 {t("hearing.pitch.notSure", "Not Sure")}
@@ -811,11 +959,29 @@ function PitchModule({
         {pmScreen === "confirm" && matchedHz !== null && (
           <div className="stack stack-5">
             <span className="label label--signal">{t("hearing.pitch.identifiedTitle", "Your closest pitch has been identified")}</span>
-            <div className="row">
-              <button type="button" className="btn btn--primary" onClick={() => playProbe(matchedHz, comparisonLevel)}>
-                <IconPlay size={15} />
-                {t("hearing.pitch.playMatchedSound", "Play Matched Sound")}
+            <div className="row row--tight">
+              <button
+                type="button"
+                className={`btn ${activeProbe === "confirm" ? "btn--primary" : ""}`}
+                onClick={() => {
+                  if (activeProbe === "confirm") {
+                    handleStop();
+                  } else {
+                    void playProbe(matchedHz, comparisonLevel, 10000, "confirm");
+                  }
+                }}
+              >
+                {activeProbe === "confirm" ? <IconStop size={15} /> : <IconPlay size={15} />}
+                {activeProbe === "confirm"
+                  ? `Playing Matched Sound (${probeCountdown}s)`
+                  : `${t("hearing.pitch.playMatchedSound", "Play Matched Sound")} (10s)`}
               </button>
+              {activeProbe === "confirm" && (
+                <button type="button" className="btn btn--ghost" onClick={handleStop}>
+                  <IconStop size={15} />
+                  {t("hearing.pitch.stop", "Stop")}
+                </button>
+              )}
             </div>
             <Readout label={t("hearing.pitch.matchedFrequency", "Matched frequency")} value={(matchedHz / 1000).toFixed(2)} unit="kHz" size="lg" tone="signal" note={`${matchedHz} Hz`} />
 
@@ -1297,6 +1463,7 @@ function MaskingModule({
   stopSound,
   onBack,
   onNext,
+  audiogram,
 }: {
   pitchOutcome: PitchMatchOutcome | null;
   loudnessOutcome: LoudnessMatchOutcome | null;
@@ -1307,17 +1474,24 @@ function MaskingModule({
   stopSound(): void;
   onBack(): void;
   onNext(outcome: MaskingMatchOutcome): void;
+  audiogram?: Record<string, Record<string, number>> | null;
 }) {
   const { t } = useTranslation();
+  const hasAudiogram = Boolean(
+    audiogram && (Object.keys(audiogram.left ?? {}).length > 0 || Object.keys(audiogram.right ?? {}).length > 0)
+  );
+  const [chartView, setChartView] = useState<"combined" | "masking">(hasAudiogram ? "combined" : "masking");
   const [mScreen, setMScreen] = useState<MaskingScreen>(existingOutcome ? "result" : "instructions");
   const [freqIndex, setFreqIndex] = useState(0);
   const [results, setResults] = useState<MaskingFrequencyResult[]>(existingOutcome?.frequencies ?? []);
   const [repeated, setRepeated] = useState(existingOutcome?.repeated ?? false);
   const [level, setLevel] = useState<number | null>(null);
 
+  const [showCompletionModal, setShowCompletionModal] = useState(false);
+
   const finder = useRef<MaskingLevelFinder | null>(null);
   const hz = MASKING_FREQUENCIES[freqIndex];
-  const ceiling = Math.min(85, Math.round(engine.maxReachableHl(hz))); // MAX_SAFE_MASKING_DB, backend/api/services/masking.py
+  const ceiling = 90;
 
   async function playAt(centreHz: number, dbHL: number, ms = 2000) {
     await engine.resume();
@@ -1345,8 +1519,8 @@ function MaskingModule({
   }
 
   function beginFrequency(index: number) {
-    const start = startingLevelFor(index);
-    finder.current = new MaskingLevelFinder(start, -10, ceiling);
+    const start = Math.max(0, Math.min(90, startingLevelFor(index)));
+    finder.current = new MaskingLevelFinder(start, 0, ceiling);
     setLevel(finder.current.currentLevel);
     setMScreen("measuring");
   }
@@ -1370,6 +1544,31 @@ function MaskingModule({
     } else {
       setLevel(finder.current.currentLevel);
     }
+  }
+
+  function handleFinishClick() {
+    stopSound();
+    if (mScreen === "measuring" && finder.current && level !== null) {
+      const existingIdx = results.findIndex((r) => r.frequency_hz === hz);
+      const currentRes: MaskingFrequencyResult = {
+        frequency_hz: hz,
+        trials:
+          finder.current.trace.length > 0
+            ? finder.current.trace
+            : [{ trial_number: 1, phase: finder.current.phase, level_db: level, response: "masked", at: Date.now() }],
+        mml_db: level,
+      };
+      if (existingIdx >= 0) {
+        setResults((prev) => {
+          const next = [...prev];
+          next[existingIdx] = currentRes;
+          return next;
+        });
+      } else {
+        setResults((prev) => [...prev, currentRes]);
+      }
+    }
+    setShowCompletionModal(true);
   }
 
   function repeatAssessment() {
@@ -1409,7 +1608,7 @@ function MaskingModule({
               )}
             </p>
             <p style={{ fontSize: "var(--fs-small)", maxWidth: "50em" }}>
-              {t("hearing.masking.instructions3", "You do not need to adjust the volume yourself.")}
+              {t("hearing.masking.instructions3", "You can also adjust the volume slider or use the +10 dB / -3 dB buttons.")}
             </p>
             <div className="row row--end">
               <button type="button" className="btn btn--primary btn--lg" onClick={() => setMScreen("stimulus_intro")}>
@@ -1427,7 +1626,7 @@ function MaskingModule({
             <p style={{ fontSize: "var(--fs-small)", maxWidth: "50em", lineHeight: 1.6 }}>
               {t(
                 "hearing.masking.autoFrequencyNote",
-                "The app automatically changes the frequency of the masking sound during the assessment. You don't need to select the frequency."
+                "The app tests frequencies from 250 Hz to 8000 Hz. You can adjust the level directly using the 0–90 dB slider and stepper buttons."
               )}
             </p>
             <div className="row row--end">
@@ -1455,13 +1654,52 @@ function MaskingModule({
               </p>
             )}
             <p className="meta dim">
-              {t("hearing.masking.currentFrequency", { hz, defaultValue: `Current masking frequency: ${hz} Hz` })}
+              {t("hearing.masking.currentFrequency", { hz, defaultValue: `Current masking frequency: ${hz} Hz (Range: 250 Hz–8000 Hz)` })}
             </p>
 
             <div className="row">
               <button type="button" className="btn btn--primary" onClick={() => playAt(hz, level)}>
                 <IconPlay size={15} />
                 {t("hearing.masking.playSound", "Play Sound")}
+              </button>
+            </div>
+
+            <SteppedSlider
+              value={level}
+              min={0}
+              max={90}
+              step={1}
+              onChange={(val) => {
+                setLevel(val);
+                finder.current?.setLevel(val);
+              }}
+              format={(v) => `${v} dB`}
+              label={t("hearing.masking.sliderLabel", "Masking Level (0–90 dB)")}
+              ariaLabel={t("hearing.masking.sliderLabel", "Masking Level (0–90 dB)")}
+            />
+
+            <div className="row row--tight" style={{ gap: "var(--s2)" }}>
+              <button
+                type="button"
+                className="btn btn--sm"
+                onClick={() => {
+                  const next = Math.max(0, level - 3);
+                  setLevel(next);
+                  finder.current?.setLevel(next);
+                }}
+              >
+                -3 dB
+              </button>
+              <button
+                type="button"
+                className="btn btn--sm"
+                onClick={() => {
+                  const next = Math.min(90, level + 10);
+                  setLevel(next);
+                  finder.current?.setLevel(next);
+                }}
+              >
+                +10 dB
               </button>
             </div>
 
@@ -1559,7 +1797,7 @@ function MaskingModule({
               <button type="button" className="btn btn--ghost" onClick={repeatAssessment}>
                 {t("hearing.masking.repeatAssessment", "Repeat Assessment")}
               </button>
-              <button type="button" className="btn btn--primary btn--lg" onClick={done}>
+              <button type="button" className="btn btn--primary btn--lg" onClick={handleFinishClick}>
                 {t("hearing.masking.finishButton", "Finish")}
               </button>
             </div>
@@ -1571,37 +1809,158 @@ function MaskingModule({
             <button type="button" className="btn" onClick={onBack}>
               ← {t("common.back")}
             </button>
-            <span className="meta dim">
-              {t("hearing.masking.progress")}: {testedCount}/{totalCount}
-            </span>
+            <div className="row row--tight" style={{ alignItems: "center" }}>
+              <span className="meta dim" style={{ marginRight: "var(--s2)" }}>
+                {t("hearing.masking.progress")}: {testedCount}/{totalCount}
+              </span>
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={handleFinishClick}
+              >
+                {t("hearing.masking.finishButton", "Finish")}
+              </button>
+            </div>
           </div>
         )}
       </Panel>
 
+      {/* Completion Modal Pop-up */}
+      <Modal
+        open={showCompletionModal}
+        onClose={() => setShowCompletionModal(false)}
+        title={t("hearing.masking.completionModalTitle", "Masking Test Complete")}
+        footer={
+          <div className="row row--end row--tight">
+            <button
+              type="button"
+              className="btn btn--primary btn--lg"
+              onClick={() => {
+                setShowCompletionModal(false);
+                done();
+              }}
+            >
+              {t("hearing.masking.completeAndProceed", "Complete & Proceed")}
+            </button>
+          </div>
+        }
+      >
+        <div className="stack stack-4">
+          <p style={{ fontSize: "var(--fs-body)", lineHeight: 1.6 }}>
+            {t(
+              "hearing.masking.completionModalLead",
+              "You have completed the masking test. Your Minimum Masking Levels across frequencies have been recorded."
+            )}
+          </p>
+          <div className="grid grid-2">
+            <Panel tone="sunken" tight>
+              <span className="label">{t("hearing.masking.frequenciesTested", "Frequencies Tested")}</span>
+              <span className="stat stat--lg">
+                {results.length} / {totalCount}
+              </span>
+            </Panel>
+            <Panel tone="sunken" tight>
+              <span className="label">{t("hearing.masking.lowestMml", "Lowest Masking Level")}</span>
+              <span className="stat stat--lg">
+                {results.some((r) => r.mml_db !== null)
+                  ? `${Math.min(...results.filter((r) => r.mml_db !== null).map((r) => r.mml_db as number))} dB`
+                  : "—"}
+              </span>
+            </Panel>
+          </div>
+          <p className="meta dim">
+            {t(
+              "hearing.masking.completionModalNote",
+              "These thresholds will be combined with your hearing profile to calibrate personalized sound therapy."
+            )}
+          </p>
+        </div>
+      </Modal>
+
       {/* The curve appears as soon as there is anything to plot, so the
           patient watches it build rather than meeting it cold at the end. */}
       {testedCount >= 2 && (
-        <Panel title={t("masking.chart.title")} bracketed>
-          <MaskingCurve
-            curve={buildMaskingCurvePoints(MASKING_FREQUENCIES, results)}
-            referenceDb={
-              results.some((r) => r.mml_db !== null)
-                ? Math.min(...results.filter((r) => r.mml_db !== null).map((r) => r.mml_db as number))
-                : null
-            }
-            referenceHz={
-              results.some((r) => r.mml_db !== null)
-                ? results
-                    .filter((r) => r.mml_db !== null)
-                    .sort((a, b) => (a.mml_db as number) - (b.mml_db as number) || a.frequency_hz - b.frequency_hz)[0]
-                    .frequency_hz
-                : null
-            }
-            height={260}
-          />
-          <p className="meta" style={{ marginTop: "var(--s3)" }}>
-            {t("masking.chart.legend")}
-          </p>
+        <Panel title={t("masking.chart.title", { defaultValue: "Tinnitus Masking Pattern" })} bracketed>
+          {hasAudiogram && (
+            <div className="row row--between row--baseline" style={{ marginBottom: "var(--s3)" }}>
+              <div className="row row--tight">
+                <Chip tone="signal" dot>
+                  {t("masking.chart.patternDoctorView", { defaultValue: "Hearing Test + Masking Test Overlay" })}
+                </Chip>
+              </div>
+              <div className="btn-group">
+                <button
+                  type="button"
+                  className={`btn btn--sm${chartView === "combined" ? " btn--primary" : ""}`}
+                  onClick={() => setChartView("combined")}
+                >
+                  {t("masking.chart.viewCombined", { defaultValue: "Combined Pattern" })}
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn--sm${chartView === "masking" ? " btn--primary" : ""}`}
+                  onClick={() => setChartView("masking")}
+                >
+                  {t("masking.chart.viewMaskingOnly", { defaultValue: "Masking Only" })}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {hasAudiogram && chartView === "combined" ? (
+            <>
+              <CombinedAudiogramMasking
+                audiogram={audiogram}
+                curve={buildMaskingCurvePoints(MASKING_FREQUENCIES, results)}
+                pitchHz={pitchOutcome?.hz}
+                height={320}
+                showLegend={true}
+              />
+              <div
+                style={{
+                  marginTop: "var(--s3)",
+                  padding: "var(--s3)",
+                  background: "var(--paper-sunken)",
+                  borderRadius: "var(--radius)",
+                }}
+              >
+                <span className="label" style={{ color: "var(--signal-ink)", fontSize: "var(--fs-tiny)" }}>
+                  {t("masking.chart.doctorInterpretation", {
+                    defaultValue: "Doctor Interpretation: Pure-Tone Thresholds vs Minimum Masking Levels",
+                  })}
+                </span>
+                <p className="meta" style={{ margin: "var(--s1) 0 0", fontSize: "var(--fs-tiny)", lineHeight: 1.5 }}>
+                  {t("masking.chart.doctorNote", {
+                    defaultValue:
+                      "The vertical distance between the hearing thresholds (circles/crosses) and minimum masking levels (squares) represents the sensation level (SL). Masking tracking 5–10 dB above hearing thresholds indicates normal cochlear maskability; localized divergence identifies frequencies requiring targeted therapy.",
+                  })}
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <MaskingCurve
+                curve={buildMaskingCurvePoints(MASKING_FREQUENCIES, results)}
+                referenceDb={
+                  results.some((r) => r.mml_db !== null)
+                    ? Math.min(...results.filter((r) => r.mml_db !== null).map((r) => r.mml_db as number))
+                    : null
+                }
+                referenceHz={
+                  results.some((r) => r.mml_db !== null)
+                    ? results
+                        .filter((r) => r.mml_db !== null)
+                        .sort((a, b) => (a.mml_db as number) - (b.mml_db as number) || a.frequency_hz - b.frequency_hz)[0]
+                        .frequency_hz
+                    : null
+                }
+                height={260}
+              />
+              <p className="meta" style={{ marginTop: "var(--s3)" }}>
+                {t("masking.chart.legend")}
+              </p>
+            </>
+          )}
         </Panel>
       )}
     </div>

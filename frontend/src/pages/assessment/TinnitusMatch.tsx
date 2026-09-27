@@ -33,7 +33,7 @@ import {
   type ToleranceTrial,
 } from "../../audio/procedures";
 import { RiCurve } from "../../components/charts";
-import { Chip, Fader, OptionGroup, Panel, Readout, StepRail, fmt } from "../../components/ui";
+import { Chip, Fader, Modal, OptionGroup, Panel, Readout, StepRail, fmt } from "../../components/ui";
 import { IconPlay, IconStop } from "../../components/icons";
 
 /** The patient's structured immediate response, asked right after the masker
@@ -148,6 +148,9 @@ export default function TinnitusMatch({
   audiogram,
   laterality,
   character,
+  initialPitchHz,
+  initialMmlDb,
+  onlyRi = false,
   onComplete,
   onSkip,
 }: {
@@ -155,11 +158,15 @@ export default function TinnitusMatch({
   laterality: string | null;
   /** Already captured at intake — not asked again here. */
   character?: string | null;
+  initialPitchHz?: number | null;
+  initialMmlDb?: number | null;
+  onlyRi?: boolean;
   onComplete(result: MatchResult): void;
   onSkip?(): void;
 }) {
   const { t } = useTranslation();
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(onlyRi ? 4 : 0);
+  const [showRiCompletionModal, setShowRiCompletionModal] = useState(false);
   const [done, setDone] = useState<Set<string>>(new Set());
 
   const [bandwidth, setBandwidth] = useState<"tonal" | "narrowband" | "broadband">("tonal");
@@ -173,7 +180,7 @@ export default function TinnitusMatch({
   const [octaveCandidates, setOctaveCandidates] = useState<number[]>([]);
 
   const [loudnessDbHl, setLoudnessDbHl] = useState(20);
-  const [mmlDbHl, setMmlDbHl] = useState(30);
+  const [mmlDbHl, setMmlDbHl] = useState(initialMmlDb ?? 30);
   /**
    * Centre frequency of the masking band, as an adjustable control.
    *
@@ -228,7 +235,7 @@ export default function TinnitusMatch({
 
   const matchEar: AudioEar = laterality === "left" || laterality === "right" ? (laterality as AudioEar) : "both";
   const referenceEar = laterality === "left" ? "left" : "right";
-  const pitchHz = pitchResult?.hz ?? null;
+  const pitchHz = initialPitchHz ?? pitchResult?.hz ?? 4000;
   const thresholdDbHl = pitchHz ? thresholdAt(audiogram, referenceEar, pitchHz) : null;
   /** The frequency the masker is actually centred on right now. */
   const mmlHz = mmlHzOverride ?? pitchHz ?? null;
@@ -599,14 +606,22 @@ export default function TinnitusMatch({
   const loudnessSl = toSensationLevel(loudnessDbHl, thresholdDbHl);
   const mmlSl = toSensationLevel(mmlDbHl, mmlThresholdDbHl ?? thresholdDbHl);
 
+  function handleRiFinishClick() {
+    stopSound();
+    engine.stopAll(0.2);
+    setShowRiCompletionModal(true);
+  }
+
   return (
     <div className="stack stack-5">
-      <StepRail
-        steps={SUBSTEP_KEYS.map((key) => ({ key, label: t(`match.steps.${key}`) }))}
-        current={step}
-        completed={done}
-        onJump={(i) => setStep(i)}
-      />
+      {!onlyRi && (
+        <StepRail
+          steps={SUBSTEP_KEYS.map((key) => ({ key, label: t(`match.steps.${key}`) }))}
+          current={step}
+          completed={done}
+          onJump={(i) => setStep(i)}
+        />
+      )}
 
       {/* ================================================== 1 · character === */}
       {step === 0 && (
@@ -1380,8 +1395,8 @@ export default function TinnitusMatch({
                       <button type="button" className="btn btn--sm btn--ghost" onClick={repeatRi}>
                         {t("match.repeatRi", { defaultValue: "Repeat residual inhibition" })}
                       </button>
-                      <button type="button" className="btn btn--primary btn--lg" onClick={finish}>
-                        {t("match.finishCharacterisation")}
+                      <button type="button" className="btn btn--primary btn--lg" onClick={handleRiFinishClick}>
+                        {t("match.finishCharacterisation", { defaultValue: "Finish Residual Inhibition" })}
                       </button>
                     </div>
                   </div>
@@ -1433,8 +1448,8 @@ export default function TinnitusMatch({
                       <button type="button" className="btn btn--sm btn--ghost" onClick={repeatRi}>
                         {t("match.repeatRi", { defaultValue: "Repeat residual inhibition" })}
                       </button>
-                      <button type="button" className="btn btn--primary btn--lg" onClick={finish}>
-                        {t("match.finishCharacterisation")}
+                      <button type="button" className="btn btn--primary btn--lg" onClick={handleRiFinishClick}>
+                        {t("match.finishCharacterisation", { defaultValue: "Finish Residual Inhibition" })}
                       </button>
                     </div>
                   </div>
@@ -1442,8 +1457,8 @@ export default function TinnitusMatch({
 
                 {riPhase !== "done" && (
                   <div className="row row--end">
-                    <button type="button" className="btn btn--sm btn--ghost" onClick={finish}>
-                      {t("match.skipRi")}
+                    <button type="button" className="btn btn--sm btn--ghost" onClick={onSkip ?? handleRiFinishClick}>
+                      {t("match.skipRi", { defaultValue: "Skip residual inhibition" })}
                     </button>
                   </div>
                 )}
@@ -1460,6 +1475,75 @@ export default function TinnitusMatch({
           </Panel>
         </div>
       )}
+
+      {/* Completion Modal Pop-up */}
+      <Modal
+        open={showRiCompletionModal}
+        onClose={() => setShowRiCompletionModal(false)}
+        title={t("match.riCompletionTitle", "Residual Inhibition Complete")}
+        footer={
+          <div className="row row--end row--tight">
+            <button
+              type="button"
+              className="btn btn--primary btn--lg"
+              onClick={() => {
+                setShowRiCompletionModal(false);
+                finish();
+              }}
+            >
+              {t("match.completeAndProceed", "Complete Assessment")}
+            </button>
+          </div>
+        }
+      >
+        <div className="stack stack-4">
+          <p style={{ fontSize: "var(--fs-body)", lineHeight: 1.6 }}>
+            {t(
+              "match.riCompletionLead",
+              "You have completed the residual inhibition test. Your response has been recorded."
+            )}
+          </p>
+          <div className="grid grid-2">
+            <Panel tone="sunken" tight>
+              <span className="label">{t("match.category", "Response Category")}</span>
+              <Chip
+                tone={
+                  riAnalysis?.category === "Complete" || riAnalysis?.category === "Partial"
+                    ? "ok"
+                    : riAnalysis?.category === "Rebound"
+                      ? "crit"
+                      : "warn"
+                }
+                dot
+              >
+                {riAnalysis
+                  ? t(riAnalysis.categoryKey)
+                  : riImmediateResponse === "COMPLETELY_ABSENT"
+                    ? t("match.riImmediate.completelyAbsent", "Completely absent")
+                    : riImmediateResponse === "REDUCED"
+                      ? t("match.riImmediate.reduced", "Reduced")
+                      : riImmediateResponse === "LOUDER"
+                        ? t("match.riImmediate.louder", "Louder")
+                        : t("match.riImmediate.noChange", "No change")}
+              </Chip>
+            </Panel>
+            <Panel tone="sunken" tight>
+              <span className="label">{t("match.duration", "Suppression Duration")}</span>
+              <span className="stat stat--lg">
+                {riAnalysis?.durationS !== null && riAnalysis?.durationS !== undefined
+                  ? `${riAnalysis.durationS} s`
+                  : "—"}
+              </span>
+            </Panel>
+          </div>
+          <p className="meta dim">
+            {t(
+              "match.riCompletionNote",
+              "Your results will be included in your final assessment report and used to tailor your therapy plan."
+            )}
+          </p>
+        </div>
+      </Modal>
     </div>
   );
 }

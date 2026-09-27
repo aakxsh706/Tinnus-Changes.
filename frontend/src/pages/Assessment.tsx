@@ -32,7 +32,7 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Trans, useTranslation } from "react-i18next";
+import { useTranslation } from "react-i18next";
 import { api, ApiError, type Analysis, type Assessment as AssessmentRow } from "../api/client";
 import { useSession } from "../state/session";
 import { engine } from "../audio/engine";
@@ -84,7 +84,7 @@ const STEPS = [
   { key: "intake", minutes: 2 },
   { key: "questionnaire", minutes: 6 },
   { key: "hearing", minutes: 6 },
-  { key: "optional", minutes: 0 },
+  { key: "ri", minutes: 2 },
   { key: "results", minutes: 0 },
 ];
 
@@ -111,15 +111,9 @@ export default function Assessment() {
   const [fatal, setFatal] = useState<unknown>(null);
 
   const [hearingPhase, setHearingPhase] = useState<HearingPhase>("calibration");
+  const [latestAudiogram, setLatestAudiogram] = useState<Record<string, Record<string, number>> | null>(null);
   /** Kept so the results step can show the curve without a refetch. */
   const [measurement, setMeasurement] = useState<HearingMeasurementResult | null>(null);
-  // Screeners no longer gate this offer — the "Sleep, mood and stress" module
-  // that used to precede it inside this same step was removed and folded into
-  // Module 2 (About Your Tinnitus), which now runs entirely at step 1. Step 3
-  // is reached only after hearing measurement is done, so the offer can show
-  // immediately rather than waiting on a flag another module used to flip.
-  const [offerOptional, setOfferOptional] = useState(true);
-  const [doingOptional, setDoingOptional] = useState(false);
 
   const profile = useAsync(() => api.patients.me(), []);
   const instruments = useAsync(() => api.assessments.instruments(), []);
@@ -333,6 +327,7 @@ export default function Assessment() {
 
   async function submitAudiometry(result: AudiometryResult) {
     setSaving(true);
+    setLatestAudiogram(result.audiogram);
     try {
       // The reliability verdict travels with the thresholds it qualifies.
       // Previously only `audiogram` was sent and `reliable` was raised as a
@@ -341,7 +336,7 @@ export default function Assessment() {
       // reports or the clinician. A threshold obtained from someone pressing the
       // button in silence is not a threshold, and a report that shows it without
       // that caveat is worse than one with a gap in it.
-      await saveModule(
+      const saved = await saveModule(
         {
           audiogram: result.audiogram,
           audiometry_reliable: result.reliable,
@@ -352,6 +347,7 @@ export default function Assessment() {
         },
         ["audiometry"]
       );
+      setAssessment(saved);
       if (!result.reliable) toast(t("assessment.toast.audiometryFlagged"), "crit");
       // Audiometry is the last part of the hearing step's *calibration* half;
       // the three measurement modules follow before the step is done.
@@ -398,6 +394,7 @@ export default function Assessment() {
    * so nothing here needs to interrupt testing over a dropped autosave.
    */
   function saveAudiometryProgress(audiogram: AudiometryResult["audiogram"]) {
+    setLatestAudiogram(audiogram);
     saveModule({ audiogram }, []).catch(() => {
       // A failed background autosave does not stop the test; the next
       // successful one (or the final `submitAudiometry`) carries the same
@@ -414,8 +411,10 @@ export default function Assessment() {
    */
   async function exitAudiometryPartial(audiogram: AudiometryResult["audiogram"]) {
     setSaving(true);
+    setLatestAudiogram(audiogram);
     try {
-      await saveModule({ audiogram }, []);
+      const saved = await saveModule({ audiogram }, []);
+      setAssessment(saved);
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.audiometryFailed"), "crit");
     } finally {
@@ -623,9 +622,8 @@ export default function Assessment() {
           ri_return_to_baseline_at: result.ri_return_to_baseline_at,
           ri_repeated: result.ri_repeated,
         },
-        ["pitch_match", "loudness_match", "mml", "residual_inhibition"]
+        ["residual_inhibition"]
       );
-      setDoingOptional(false);
       await finalise();
     } catch (error) {
       setFatal(error);
@@ -642,13 +640,12 @@ export default function Assessment() {
       const finalised = await api.assessments.finalise(assessment.id);
       setAssessment(finalised.assessment);
       setAnalysis(finalised.analysis);
-      setOfferOptional(false);
       if (finalised.analysis.red_flags.requires_human_review) {
         toast(t("assessment.toast.redFlags"), "crit");
       } else {
         toast(t("assessment.toast.complete"), "ok");
       }
-      markDone("optional", 4);
+      markDone("ri", 4);
     } catch (error) {
       setFatal(error);
       toast(error instanceof ApiError ? error.message : t("assessment.toast.finaliseFailed"), "crit");
@@ -693,7 +690,35 @@ export default function Assessment() {
 
       {/* ==================================================== 0 · intake === */}
       {step === 0 && (
-        <div className="grid grid-sidebar" style={{ ["--aside" as string]: "300px" }}>
+        <div className="stack stack-5">
+          <Panel title={t("assessment.whatHappens.title")} bracketed>
+            <div className="stack stack-3">
+              <div className="grid grid-4" style={{ gap: "var(--s4)" }}>
+                {STEPS.filter((s) => s.minutes > 0).map((s, idx) => (
+                  <div
+                    key={s.key}
+                    style={{
+                      padding: "var(--s3)",
+                      background: "var(--paper-sunken)",
+                      borderRadius: "var(--radius)",
+                    }}
+                  >
+                    <span className="label label--signal">
+                      {idx + 1}. {t(`assessment.steps.${s.key}`)}
+                    </span>
+                    <span className="meta" style={{ display: "block", marginTop: "var(--s1)" }}>
+                      {t("assessment.whatHappens.about", { minutes: s.minutes })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <hr className="rule" />
+              <p className="meta" style={{ margin: 0 }}>
+                {t("assessment.whatHappens.note")}
+              </p>
+            </div>
+          </Panel>
+
           <Panel title={t("assessment.intake.title")} bracketed>
             <div className="stack stack-5">
               {/* -- About Your Tinnitus, Hearing & Health ---------------------- */}
@@ -751,21 +776,6 @@ export default function Assessment() {
                 </button>
               </div>
             </div>
-          </Panel>
-
-          <Panel title={t("assessment.whatHappens.title")} tight headPlain>
-            <ol className="stack stack-3" style={{ paddingLeft: "var(--s5)", fontSize: "var(--fs-tiny)" }}>
-              {STEPS.filter((s) => s.minutes > 0).map((s) => (
-                <li key={s.key}>
-                  <strong>{t(`assessment.steps.${s.key}`)}</strong>
-                  <span className="meta" style={{ display: "block" }}>
-                    {t("assessment.whatHappens.about", { minutes: s.minutes })}
-                  </span>
-                </li>
-              ))}
-            </ol>
-            <hr className="rule" />
-            <p className="meta">{t("assessment.whatHappens.note")}</p>
           </Panel>
         </div>
       )}
@@ -867,7 +877,8 @@ export default function Assessment() {
               onSkip={skipAudiometry}
               onProgress={saveAudiometryProgress}
               onExit={exitAudiometryPartial}
-              initialAudiogram={assessment?.audiogram}
+              initialAudiogram={latestAudiogram ?? assessment?.audiogram}
+              initialMaskingCurve={(assessment as any)?.masking_curve ?? (assessment as any)?.psychoacoustics?.masking?.curve}
             />
           ) : hearingPhase === "measurement" ? (
             /* Pitch, loudness and the masking profile — the three modules the
@@ -876,6 +887,7 @@ export default function Assessment() {
               onComplete={submitHearingMeasurement}
               initial={measurement ?? undefined}
               laterality={laterality}
+              audiogram={latestAudiogram ?? assessment?.audiogram}
             />
           ) : (
             /* Last, because it is derived from the three above rather than a
@@ -889,82 +901,21 @@ export default function Assessment() {
         </div>
       )}
 
-      {/* ================================================== 3 · optional === */}
-      {/* The old "Sleep, mood and stress" module used to run here before this
-          offer; it no longer exists as a separate step (its questionnaires
-          moved into Module 2 at step 1), so this offer is now this step's
-          entire content. */}
-      {/* -- optional psychoacoustics offer ---------------------------------- */}
-      {step === 3 && offerOptional && !doingOptional && (
-        <div className="grid grid-sidebar" style={{ ["--aside" as string]: "300px" }}>
-          <Panel title={t("assessment.optional.title")} bracketed tone="signal">
-            <div className="stack stack-5">
-              <p className="lead" style={{ fontSize: "var(--fs-body)" }}>
-                {t("assessment.optional.lead")}
-              </p>
-
-              <div className="grid grid-2">
-                <Panel tone="sunken" tight>
-                  <span className="label" style={{ color: "var(--ok-ink)" }}>
-                    {t("assessment.optional.givesTitle")}
-                  </span>
-                  <ul className="stack stack-1" style={{ paddingLeft: "var(--s5)", fontSize: "var(--fs-small)", marginTop: "var(--s2)" }}>
-                    <li>
-                      <Trans i18nKey="assessment.optional.gives1" components={[<em key="0" />]} />
-                    </li>
-                    <li>{t("assessment.optional.gives2")}</li>
-                    <li>{t("assessment.optional.gives3")}</li>
-                  </ul>
-                </Panel>
-                <Panel tone="sunken" tight>
-                  <span className="label">{t("assessment.optional.skipTitle")}</span>
-                  <ul className="stack stack-1" style={{ paddingLeft: "var(--s5)", fontSize: "var(--fs-small)", marginTop: "var(--s2)" }}>
-                    <li>{t("assessment.optional.skip1")}</li>
-                    <li>{t("assessment.optional.skip2")}</li>
-                    <li>{t("assessment.optional.skip3")}</li>
-                  </ul>
-                </Panel>
-              </div>
-
-              <Panel tone="info" tight>
-                <p className="meta">{t("assessment.optional.note")}</p>
-              </Panel>
-
-              <div className="row">
-                <button
-                  type="button"
-                  className="btn btn--primary btn--lg"
-                  onClick={() => {
-                    setDoingOptional(true);
-                    window.scrollTo({ top: 0, behavior: "smooth" });
-                  }}
-                >
-                  {t("assessment.optional.accept")}
-                </button>
-                <button type="button" className="btn btn--lg" onClick={finalise} disabled={saving}>
-                  {t("assessment.optional.decline")}
-                </button>
-              </div>
-            </div>
-          </Panel>
-
-          <Panel title={t("assessment.optional.whyTitle")} tight headPlain>
-            <p className="meta">{t("assessment.optional.why1")}</p>
-            <hr className="rule" />
-            <p className="meta">{t("assessment.optional.why2")}</p>
-          </Panel>
-        </div>
-      )}
-
-      {step === 3 && doingOptional && (
+      {/* ======================================= 3 · residual inhibition === */}
+      {step === 3 && (
         <TinnitusMatch
-          audiogram={assessment?.audiogram ?? {}}
+          audiogram={latestAudiogram ?? assessment?.audiogram ?? {}}
           laterality={laterality}
+          character={characters[0]}
+          initialPitchHz={measurement?.pitch_match_hz ?? 4000}
+          initialMmlDb={
+            measurement?.masking_thresholds && Object.values(measurement.masking_thresholds).length > 0
+              ? Math.min(...Object.values(measurement.masking_thresholds))
+              : 30
+          }
+          onlyRi={true}
           onComplete={submitMatch}
-          onSkip={() => {
-            setDoingOptional(false);
-            void finalise();
-          }}
+          onSkip={finalise}
         />
       )}
 

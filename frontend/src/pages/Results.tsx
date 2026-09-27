@@ -153,6 +153,7 @@ export default function Results() {
   // Clinicians land on this page to read the detail, so it opens expanded for
   // them; patients get the summary first.
   const [showDetail, setShowDetail] = useState(isClinician);
+  const [clinicalChartMode, setClinicalChartMode] = useState<"combined" | "audiogram">("combined");
 
   if (assessments.loading) return <Loading label={t("results.loading")} rows={4} />;
   if (assessments.error) return <ErrorState error={assessments.error} retry={assessments.reload} />;
@@ -180,6 +181,10 @@ export default function Results() {
     data?.audiometry?.raw &&
       (Object.keys(data.audiometry.raw.left ?? {}).length ||
         Object.keys(data.audiometry.raw.right ?? {}).length)
+  );
+  const hasMaskingCurve = Boolean(
+    Array.isArray(data?.psychoacoustics?.masking?.curve) &&
+      data.psychoacoustics.masking.curve.some((p: any) => p?.threshold_db !== null && p?.masked === true)
   );
   const prediction = detail?.prediction;
   const outputs = prediction?.outputs ?? {};
@@ -434,12 +439,47 @@ export default function Results() {
           <div className="grid grid-sidebar" style={{ ["--aside" as string]: "330px" }}>
             <div className="stack stack-5">
               <Panel title={t("results.clinical.audiometry")} bracketed>
-                <Audiogram
-                  audiogram={data.audiometry.raw}
-                  pitchHz={data.psychoacoustics.pitch_match_hz}
-                  notchHz={data.audiometry.audiometric_notch_hz}
-                  height={330}
-                />
+                {hasMaskingCurve && (
+                  <div className="row row--between row--baseline" style={{ marginBottom: "var(--s3)" }}>
+                    <Chip tone="signal" dot>
+                      {clinicalChartMode === "combined"
+                        ? t("results.clinical.combinedGraphTitle", { defaultValue: "Hearing Test + Masking Test Overlay" })
+                        : t("results.clinical.audiogramOnlyTitle", { defaultValue: "Pure-Tone Audiogram" })}
+                    </Chip>
+                    <div className="btn-group">
+                      <button
+                        type="button"
+                        className={`btn btn--micro${clinicalChartMode === "combined" ? " btn--primary" : " btn--ghost"}`}
+                        onClick={() => setClinicalChartMode("combined")}
+                      >
+                        {t("results.clinical.combinedMode", { defaultValue: "Combined (Doctor View)" })}
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn btn--micro${clinicalChartMode === "audiogram" ? " btn--primary" : " btn--ghost"}`}
+                        onClick={() => setClinicalChartMode("audiogram")}
+                      >
+                        {t("results.clinical.audiogramMode", { defaultValue: "Audiogram Only" })}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {hasMaskingCurve && clinicalChartMode === "combined" ? (
+                  <CombinedAudiogramMasking
+                    audiogram={data.audiometry.raw}
+                    curve={data.psychoacoustics.masking.curve}
+                    pitchHz={data.psychoacoustics.pitch_match_hz}
+                    height={350}
+                    showLegend={true}
+                  />
+                ) : (
+                  <Audiogram
+                    audiogram={data.audiometry.raw}
+                    pitchHz={data.psychoacoustics.pitch_match_hz}
+                    notchHz={data.audiometry.audiometric_notch_hz}
+                    height={330}
+                  />
+                )}
                 <AudiometryReviewBlock review={data.audiometry.review} />
                 {!hasAudiogram && (
                   <AudiogramElsewhereNotice
@@ -447,7 +487,7 @@ export default function Results() {
                     onOpen={setSelectedId}
                   />
                 )}
-                <MaskingOverlayBlock report={data} />
+                {(!hasMaskingCurve || clinicalChartMode !== "combined") && <MaskingOverlayBlock report={data} />}
                 <div className="grid grid-4" style={{ marginTop: "var(--s4)" }}>
                   <Readout label={t("results.clinical.ptaRight")} value={fmt.db(data.audiometry.pta_right, 1)} unit="dB HL" size="sm" />
                   <Readout label={t("results.clinical.ptaLeft")} value={fmt.db(data.audiometry.pta_left, 1)} unit="dB HL" size="sm" />

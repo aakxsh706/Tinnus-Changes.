@@ -41,7 +41,7 @@ await build({
   logLevel: "error",
 });
 
-const { ThresholdTracker, PitchMatcher, analyseResidualInhibition, toSensationLevel, buildMaskingCurvePoints } =
+const { ThresholdTracker, PitchMatcher, PitchNarrower, analyseResidualInhibition, toSensationLevel, buildMaskingCurvePoints } =
   await import(pathToFileURL(outfile).href);
 
 let failures = 0;
@@ -212,6 +212,69 @@ check(
   "omitting the retest caps confidence below a completed one",
   noRetest.confidence < clean.confidence,
   `no-retest ${noRetest.confidence} < with-retest ${clean.confidence}`
+);
+
+/* ------------------------------------------------------------------------- */
+console.log("\nDeterministic 2AFC pitch narrowing (PitchNarrower)");
+console.log("  Sound B is 1.50x Sound A (2400 Hz -> 3600 Hz), divisible by 10, stops at <= 1 semitone.\n");
+
+const pn = new PitchNarrower(2400);
+const initialPair = pn.pair();
+check(
+  "PitchNarrower starts with A=2400 Hz and B=3600 Hz (B is 1.50x A, both divisible by 10)",
+  initialPair.aHz === 2400 &&
+    initialPair.bHz === 3600 &&
+    initialPair.aHz % 10 === 0 &&
+    initialPair.bHz % 10 === 0 &&
+    initialPair.aHz % 30 === 0 &&
+    initialPair.bHz % 30 === 0,
+  `initial A=${initialPair.aHz} Hz (2.40 kHz), B=${initialPair.bHz} Hz (3.60 kHz)`
+);
+
+// Choosing A narrows upper bound to midpoint 3000 Hz (both divisible by 10 and 30)
+pn.choose("A");
+const pairAfterA = pn.pair();
+check(
+  "choosing A halves bracket to A=2400 Hz, B=3000 Hz (divisible by 10 and 30)",
+  pairAfterA.aHz === 2400 &&
+    pairAfterA.bHz === 3000 &&
+    pairAfterA.bHz % 10 === 0 &&
+    pairAfterA.bHz % 30 === 0,
+  `A=${pairAfterA.aHz} Hz, B=${pairAfterA.bHz} Hz, diff=${pn.gapSemitones()} semitones`
+);
+
+// Simulate listener matching 3100 Hz until done
+const pnSim = new PitchNarrower(2400);
+const targetHz = 3100;
+let steps = 0;
+let allDivisibleBy10 = true;
+let allMultiplesOf30 = true;
+while (!pnSim.done && steps < 15) {
+  const { aHz, bHz } = pnSim.pair();
+  if (aHz % 10 !== 0 || bHz % 10 !== 0) allDivisibleBy10 = false;
+  if (aHz % 30 !== 0 || bHz % 30 !== 0) allMultiplesOf30 = false;
+  const pick = Math.abs(aHz - targetHz) < Math.abs(bHz - targetHz) ? "A" : "B";
+  pnSim.choose(pick);
+  steps++;
+}
+
+check(
+  "all intermediate frequencies in search are divisible by 10 and multiples of 30",
+  allDivisibleBy10 && allMultiplesOf30,
+  `all frequencies divisible by 10 and multiples of 30 across ${steps} steps`
+);
+
+check(
+  "PitchNarrower stops as soon as difference reaches <= 1 semitone",
+  pnSim.done && pnSim.gapSemitones() <= 1.0,
+  `stopped in ${steps} steps at gap=${pnSim.gapSemitones()} semitones (<= 1 semitone)`
+);
+
+const matchedHz = pnSim.result();
+check(
+  "PitchNarrower matched frequency is divisible by 10 and a multiple of 30",
+  matchedHz % 10 === 0 && matchedHz % 30 === 0,
+  `matched ${matchedHz} Hz (target ~${targetHz} Hz, divisible by 10 and 30)`
 );
 
 /* ------------------------------------------------------------------------- */
