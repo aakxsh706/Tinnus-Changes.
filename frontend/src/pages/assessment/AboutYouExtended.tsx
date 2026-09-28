@@ -191,18 +191,48 @@ function SingleSelect({
 }) {
   const promptKey = `question.${slug(question.key)}`;
   return (
-    <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "var(--s2)" }}>
-      {question.options?.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          className="option"
-          aria-pressed={value === option.value}
-          onClick={() => onChange(option.value)}
-        >
-          <span style={{ minWidth: 0 }}>{tx(`${promptKey}.option.${slug(option.value)}`, option.value)}</span>
-        </button>
-      ))}
+    <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "var(--s3)" }}>
+      {question.options?.map((option) => {
+        const selected = value === option.value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            className="option option--lg"
+            style={{
+              padding: "16px var(--s4)",
+              minHeight: "52px",
+              fontSize: "1rem",
+              borderRadius: "var(--radius)",
+            }}
+            aria-pressed={selected}
+            onClick={() => onChange(option.value)}
+          >
+            <span className="row row--tight row--nowrap" style={{ minWidth: 0, alignItems: "center" }}>
+              <span
+                style={{
+                  width: 22,
+                  height: 22,
+                  borderRadius: "50%",
+                  border: "2px solid currentColor",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  marginRight: 10,
+                  flexShrink: 0,
+                }}
+              >
+                {selected && (
+                  <span style={{ width: 10, height: 10, borderRadius: "50%", background: "currentColor" }} />
+                )}
+              </span>
+              <span style={{ minWidth: 0, fontWeight: selected ? 600 : 400 }}>
+                {tx(`${promptKey}.option.${slug(option.value)}`, option.value)}
+              </span>
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -223,10 +253,6 @@ function MultiSelect({
   function toggle(option: { value: string; exclusive?: boolean }) {
     const selected = value.includes(option.value);
     if (option.exclusive) {
-      // "I'm not sure" / "None of these" / "No identifiable event" describe the
-      // absence of a specific answer, so picking one clears every other
-      // selection and picking anything else clears it straight back out —
-      // the two states cannot coexist without contradicting each other.
       onChange(selected ? [] : [option.value]);
       return;
     }
@@ -235,20 +261,42 @@ function MultiSelect({
   }
 
   return (
-    <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "var(--s2)" }}>
+    <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "var(--s3)" }}>
       {question.options?.map((option) => {
         const selected = value.includes(option.value);
         return (
           <button
             key={option.value}
             type="button"
-            className="option"
+            className="option option--lg"
+            style={{
+              padding: "16px var(--s4)",
+              minHeight: "52px",
+              fontSize: "1rem",
+              borderRadius: "var(--radius)",
+            }}
             aria-pressed={selected}
             onClick={() => toggle(option)}
           >
-            <span className="row row--tight row--nowrap" style={{ minWidth: 0 }}>
-              {selected && <IconCheck size={13} />}
-              <span style={{ minWidth: 0 }}>{tx(`${promptKey}.option.${slug(option.value)}`, option.value)}</span>
+            <span className="row row--tight row--nowrap" style={{ minWidth: 0, alignItems: "center" }}>
+              <span
+                style={{
+                  width: 22,
+                  height: 22,
+                  borderRadius: 4,
+                  border: "2px solid currentColor",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  marginRight: 10,
+                  flexShrink: 0,
+                }}
+              >
+                {selected && <IconCheck size={16} />}
+              </span>
+              <span style={{ minWidth: 0, fontWeight: selected ? 600 : 400 }}>
+                {tx(`${promptKey}.option.${slug(option.value)}`, option.value)}
+              </span>
             </span>
           </button>
         );

@@ -260,6 +260,8 @@ export default function HearingMeasurement({
   const [module, setModule] = useState<Module>("pitch");
   const [done, setDone] = useState<Set<string>>(new Set());
 
+  const [subModuleModal, setSubModuleModal] = useState<{ title: string; message: string } | null>(null);
+
   /** Set once the patient reaches the pitch-match result screen (screen 10).
    *  `null` only before that — loudness and masking cannot run without a
    *  matched frequency, same as before. */
@@ -293,6 +295,15 @@ export default function HearingMeasurement({
   function markDone(key: Module, next: Module | null) {
     stopSound();
     setDone((prev) => new Set(prev).add(key));
+    const labels: Record<Module, string> = {
+      pitch: "Pitch Matching",
+      loudness: "Loudness Matching",
+      masking: "Masking Profile",
+    };
+    setSubModuleModal({
+      title: "Sub-module Completed!",
+      message: `You have successfully completed the ${labels[key]} sub-module.`,
+    });
     if (next) setModule(next);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -393,6 +404,29 @@ export default function HearingMeasurement({
           }}
           audiogram={audiogram}
         />
+      )}
+
+      {subModuleModal && (
+        <Modal
+          open={Boolean(subModuleModal)}
+          onClose={() => setSubModuleModal(null)}
+          title={subModuleModal.title}
+          footer={
+            <button type="button" className="btn btn--primary" onClick={() => setSubModuleModal(null)}>
+              {t("common.continue", "Continue")}
+            </button>
+          }
+        >
+          <div className="stack stack-3" style={{ padding: "var(--s3) 0" }}>
+            <div className="row row--tight" style={{ color: "var(--ok-ink)" }}>
+              <IconCheck size={24} />
+              <h3 style={{ margin: 0 }}>Sub-module Complete</h3>
+            </div>
+            <p style={{ fontSize: "var(--fs-body)", margin: 0 }}>
+              {subModuleModal.message}
+            </p>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -1611,7 +1645,7 @@ function MaskingModule({
               {t("hearing.masking.instructions3", "You can also adjust the volume slider or use the +10 dB / -3 dB buttons.")}
             </p>
             <div className="row row--end">
-              <button type="button" className="btn btn--primary btn--lg" onClick={() => setMScreen("stimulus_intro")}>
+              <button type="button" className="btn btn--primary btn--lg" onClick={() => beginFrequency(0)}>
                 {t("hearing.masking.startButton", "Start")}
               </button>
             </div>

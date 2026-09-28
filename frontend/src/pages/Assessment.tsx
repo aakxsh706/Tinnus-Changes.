@@ -41,6 +41,7 @@ import {
   Chip,
   ErrorState,
   Loading,
+  Modal,
   Panel,
   Readout,
   StepRail,
@@ -49,7 +50,7 @@ import {
   useAsync,
 } from "../components/ui";
 import { Audiogram, Fingerprint, RadialGauge } from "../components/charts";
-import { IconChevronRight, IconFile } from "../components/icons";
+import { IconCheck, IconChevronRight, IconFile } from "../components/icons";
 import { ClinicalSummary } from "./Results";
 import { AboutYouExtended } from "./assessment/AboutYouExtended";
 import {
@@ -61,7 +62,7 @@ import {
 import Calibration, { type CalibrationResult } from "./assessment/Calibration";
 import Audiometry, { type AudiometryResult } from "./assessment/Audiometry";
 import TinnitusMatch, { type MatchResult } from "./assessment/TinnitusMatch";
-import AboutYourTinnitus from "./assessment/AboutYourTinnitus";
+import AboutYourTinnitus, { MODULE2_SECTIONS } from "./assessment/AboutYourTinnitus";
 import HearingMeasurement, {
   MASKING_FREQUENCIES,
   type HearingMeasurementResult,
@@ -254,6 +255,8 @@ export default function Assessment() {
     return updated;
   }
 
+  const [subModuleModal, setSubModuleModal] = useState<{ title: string; message: string } | null>(null);
+
   /* -- step handlers ------------------------------------------------------- */
   async function submitIntake() {
     setSaving(true);
@@ -266,14 +269,6 @@ export default function Assessment() {
         laterality,
         pulsatile,
         hearing_aid_use: hearingAids,
-        // `onset_date`, `somatic_modulation`, `hyperacusis` and
-        // `noise_exposure_years` are deliberately not sent here any more —
-        // Module 1 no longer asks the duration slider, the jaw/neck and
-        // everyday-sounds checkboxes, or the noise-exposure slider that used
-        // to set them. `PATCH .../patients/me` is a partial update
-        // (`partial=True`), so omitting these keys leaves whatever value is
-        // already on record untouched rather than overwriting it with a
-        // fresh default — no historical answer is lost or reset.
         comorbidities,
         medications: medications.split(",").map((m) => m.trim()).filter(Boolean),
         consent_research: consent,
@@ -283,6 +278,24 @@ export default function Assessment() {
       await saveModule({}, ["intake"]);
       setHearingPhase(profile.data?.has_saved_calibration ? "calibration" : "calibration");
       markDone("intake", 1);
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "You have successfully completed the About Your Tinnitus section.",
+      });
+    } catch (error) {
+      toast(error instanceof ApiError ? error.message : t("assessment.toast.detailsFailed"), "crit");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function skipIntake() {
+    setSaving(true);
+    try {
+      await saveModule({}, ["intake"]);
+      setHearingPhase(profile.data?.has_saved_calibration ? "calibration" : "calibration");
+      markDone("intake", 1);
+      toast(t("assessment.intake.skippedToast", "Tinnitus questionnaire skipped"), "info");
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.detailsFailed"), "crit");
     } finally {
@@ -318,6 +331,10 @@ export default function Assessment() {
     try {
       await saveModule({ device_profile: result, save_calibration: true }, ["calibration"]);
       setHearingPhase("audiometry");
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Headphone Calibration has been successfully completed. You may now proceed to Audiometry.",
+      });
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.calibrationFailed"), "crit");
     } finally {
@@ -352,6 +369,10 @@ export default function Assessment() {
       // Audiometry is the last part of the hearing step's *calibration* half;
       // the three measurement modules follow before the step is done.
       setHearingPhase("measurement");
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Audiometry assessment has been successfully completed. You may now proceed to Hearing Measurement.",
+      });
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.audiometryFailed"), "crit");
     } finally {
@@ -480,6 +501,13 @@ export default function Assessment() {
       // Only a genuinely completed section marks its module done — an
       // in-progress autosave must not make the section look finished.
       await saveModule(body, sectionStatus === "completed" ? [domainKey] : []);
+      if (sectionStatus === "completed") {
+        const sectionName = MODULE2_SECTIONS.find((s) => s.key === domainKey)?.instrumentAbbrev ?? domainKey;
+        setSubModuleModal({
+          title: "Sub-module Completed!",
+          message: `You have successfully completed the ${sectionName} questionnaire section.`,
+        });
+      }
     } catch (error) {
       toast(error instanceof ApiError ? error.message : t("assessment.toast.answersFailed"), "crit");
       throw error;
@@ -531,6 +559,10 @@ export default function Assessment() {
       // server to derive the patient's tone from exactly these three modules.
       // Nothing is re-measured; the record it reads is the one just written.
       setHearingPhase("reference");
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Hearing Measurement sub-modules (Pitch, Loudness, Masking Profile) have been successfully completed.",
+      });
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       setFatal(error);
@@ -574,6 +606,10 @@ export default function Assessment() {
         ["reference_level"]
       );
       markDone("hearing", 3);
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Personalised Reference Level sub-module completed! Hearing Assessment step is complete.",
+      });
     } catch (error) {
       setFatal(error);
       toast(error instanceof ApiError ? error.message : t("assessment.toast.referenceFailed"), "crit");
@@ -625,6 +661,10 @@ export default function Assessment() {
         ["residual_inhibition"]
       );
       await finalise();
+      setSubModuleModal({
+        title: "Sub-module Completed!",
+        message: "Module 3 (Psychoacoustic Characterisation) has been successfully completed!",
+      });
     } catch (error) {
       setFatal(error);
       toast(error instanceof ApiError ? error.message : t("assessment.toast.matchFailed"), "crit");
@@ -730,7 +770,7 @@ export default function Assessment() {
                   standing beside a fuller version of the same question. */}
               <div className="stack stack-2">
                 <h2 style={{ fontSize: "var(--fs-h3)", margin: 0 }}>
-                  {t("assessment.aboutYou.text.pageTitle", "About your tinnitus, hearing & health")}
+                  {t("assessment.aboutYou.text.pageTitle", "About Your Tinnitus")}
                 </h2>
                 <p className="meta">
                   {t(
@@ -770,9 +810,12 @@ export default function Assessment() {
                 </Panel>
               )}
 
-              <div className="row row--end">
+              <div className="row row--between">
+                <button type="button" className="btn btn--ghost" onClick={skipIntake} disabled={saving}>
+                  {t("common.skip", "Skip this questionnaire")}
+                </button>
                 <button type="button" className="btn btn--primary btn--lg" onClick={submitIntake} disabled={saving}>
-                  {t("assessment.intake.continue")}
+                  {t("assessment.intake.continue", "Continue")}
                 </button>
               </div>
             </div>
@@ -928,6 +971,29 @@ export default function Assessment() {
           measurement={measurement}
           onGoToTherapy={() => navigate("/rehabilitation")}
         />
+      )}
+
+      {subModuleModal && (
+        <Modal
+          open={Boolean(subModuleModal)}
+          onClose={() => setSubModuleModal(null)}
+          title={subModuleModal.title}
+          footer={
+            <button type="button" className="btn btn--primary" onClick={() => setSubModuleModal(null)}>
+              {t("common.continue", "Continue")}
+            </button>
+          }
+        >
+          <div className="stack stack-3" style={{ padding: "var(--s3) 0" }}>
+            <div className="row row--tight" style={{ color: "var(--ok-ink)" }}>
+              <IconCheck size={24} />
+              <h3 style={{ margin: 0 }}>Section Complete</h3>
+            </div>
+            <p style={{ fontSize: "var(--fs-body)", margin: 0 }}>
+              {subModuleModal.message}
+            </p>
+          </div>
+        </Modal>
       )}
     </div>
   );

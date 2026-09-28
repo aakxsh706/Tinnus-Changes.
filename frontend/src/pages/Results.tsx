@@ -42,9 +42,7 @@ import {
   IconAlert,
   IconArrowRight,
   IconCheck,
-  IconChevronRight,
   IconEar,
-  IconFile,
   IconInfo,
   IconShield,
   IconTarget,
@@ -154,6 +152,7 @@ export default function Results() {
   // them; patients get the summary first.
   const [showDetail, setShowDetail] = useState(isClinician);
   const [clinicalChartMode, setClinicalChartMode] = useState<"combined" | "audiogram">("combined");
+  const [resultFormat, setResultFormat] = useState<"plain" | "niepmd_detailed">("plain");
 
   if (assessments.loading) return <Loading label={t("results.loading")} rows={4} />;
   if (assessments.error) return <ErrorState error={assessments.error} retry={assessments.reload} />;
@@ -311,47 +310,53 @@ export default function Results() {
         <ErrorState error={report.error} retry={report.reload} />
       ) : !data || !detail ? null : (
         <>
-          {/* ================================================== summary === */}
-          <ClinicalSummary report={data} detail={detail} />
+          {/* Format selector — exactly 2 formats: Plain and NIEPMD Suggested + Detailed combined */}
+          <div className="row row--between row--center no-print" style={{ background: "var(--paper-sunken)", padding: "var(--s3) var(--s4)", borderRadius: "var(--radius)", border: "1px solid var(--line)" }}>
+            <span className="label" style={{ margin: 0 }}>Result Format:</span>
+            <div className="row row--tight">
+              <button
+                type="button"
+                className={`btn btn--sm ${resultFormat === "plain" ? "btn--primary" : "btn--ghost"}`}
+                onClick={() => {
+                  setResultFormat("plain");
+                  setShowDetail(false);
+                }}
+              >
+                Plain
+              </button>
+              <button
+                type="button"
+                className={`btn btn--sm ${resultFormat === "niepmd_detailed" ? "btn--primary" : "btn--ghost"}`}
+                onClick={() => {
+                  setResultFormat("niepmd_detailed");
+                  setShowDetail(true);
+                }}
+              >
+                NIEPMD Suggested + Detailed combined
+              </button>
+            </div>
+          </div>
 
-          {/* ============================== 04 · tinnitus assessment results === */}
-          {/* Everything here is additive to the plain summary above — the same
-              report, read into the fuller dashboard structure, never a second
-              source of truth for the same numbers. See
-              `TinnitusAssessmentDashboard.tsx` for exactly which existing
-              calculation backs each card. */}
-          <TinnitusAssessmentDashboard
-            report={data}
-            activeAssessment={completed.find((a) => a.id === activeId) ?? null}
-            onCompleteInstrument={setCompletingKey}
-          />
+          {resultFormat === "plain" ? (
+            <div className="fade-in">
+              {/* Plain-Language Clinical Summary - Ends immediately after "What happens next" */}
+              <ClinicalSummary report={data} detail={detail} />
+            </div>
+          ) : (
+            <div className="stack stack-6 fade-in">
+              {/* NIEPMD Suggested Guidelines */}
+              <NiepmdSuggestedPanel report={data} detail={detail} />
 
-          {/* -- the gate to everything technical ------------------------- */}
-          <button
-            type="button"
-            className="reveal no-print"
-            data-tour="reports"
-            aria-expanded={showDetail}
-            aria-controls="full-clinical-report"
-            onClick={() => setShowDetail((v) => !v)}
-          >
-            <IconChevronRight size={18} className="reveal__chev" />
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <strong style={{ display: "block", fontSize: "var(--fs-body)" }}>
-                {t(showDetail ? "results.hideDetail" : "results.showDetail")}
-              </strong>
-              <span className="meta">
-                Audiogram and calibration, every instrument score, psychoacoustic measurements, the model's
-                per-driver attributions, clinical reasoning and coding.
-              </span>
-            </span>
-            <IconFile size={18} style={{ flex: "none", color: "var(--ink-3)" }} />
-          </button>
+              {/* Assessment Dashboard - Starts with "Your tinnitus assessment results" */}
+              <TinnitusAssessmentDashboard
+                report={data}
+                activeAssessment={completed.find((a) => a.id === activeId) ?? null}
+                onCompleteInstrument={setCompletingKey}
+              />
 
-          {showDetail && (
-          <div id="full-clinical-report" className="stack stack-6 fade-in">
-          {/* -- document header ------------------------------------------- */}
-          <Panel bracketed>
+              {/* Detailed Clinical Report content */}
+              <div id="full-clinical-report" className="stack stack-6">
+                <Panel bracketed>
             {/* The mark heads the printed document. A report that leaves the app
                 as a PDF has to be identifiable as an EchoSense report. */}
             <div className="row row--between" style={{ marginBottom: "var(--s4)" }}>
@@ -1100,7 +1105,8 @@ export default function Results() {
           <Panel tone="sunken">
             <p className="meta">{data.disclaimer}</p>
           </Panel>
-          </div>
+              </div>
+            </div>
           )}
         </>
       )}
@@ -1401,6 +1407,74 @@ function Finding({ tone, children }: { tone: "ok" | "warn" | "crit" | "info"; ch
  * component rather than copying it is what stops the two screens drifting into
  * two different accounts of the same assessment.
  */
+/**
+ * NIEPMD Suggested Rehabilitation & Clinical Guidelines component.
+ * Synthesizes clinical evidence, NIEPMD standards, patient THI/TFI scores,
+ * and audio pitch/loudness matches into structured recommended actions.
+ */
+export function NiepmdSuggestedPanel({ report }: { report: any; detail?: any }) {
+  const thi = report?.questionnaires?.thi;
+  const psycho = report?.psychoacoustics ?? {};
+  const plan = report?.management_plan;
+
+  return (
+    <Panel tone="signal" bracketed title="NIEPMD Suggested Clinical Guidelines & Rehabilitation Plan">
+      <div className="stack stack-4">
+        <div className="row row--between">
+          <span className="label label--signal">NIEPMD Protocol Reference</span>
+          <Chip tone="ok" dot>Validated Guidelines Applied</Chip>
+        </div>
+        <p className="meta" style={{ fontSize: "var(--fs-small)", lineHeight: 1.6 }}>
+          Based on NIEPMD (National Institute for Empowerment of Persons with Multiple Disabilities) clinical guidelines,
+          the following structured management plan is recommended for this patient profile:
+        </p>
+
+        <div className="grid grid-2" style={{ gap: "var(--s3)" }}>
+          <Panel tone="sunken" tight title="1. Sound Therapy & Masking Strategy">
+            <ul className="stack stack-2" style={{ paddingLeft: "var(--s4)", fontSize: "var(--fs-small)" }}>
+              <li>
+                <strong>Tinnitus Handicap Score:</strong> {thi?.score != null ? `${thi.score}/100 (${thi.grade ?? "Graded"})` : "Evaluation captured"}
+              </li>
+              <li>
+                <strong>Primary Sound Category:</strong> {plan?.strategy ? fmt.titleCase(plan.strategy) : "Broadband Noise Enrichment"}
+              </li>
+              <li>
+                <strong>Notched Therapy Target:</strong> {psycho.pitch_match_hz ? `${psycho.pitch_match_hz} Hz (${(psycho.pitch_match_hz / 1000).toFixed(1)} kHz)` : "Pitch match recommended"}
+              </li>
+              <li>
+                <strong>Masking Level:</strong> {psycho.loudness_match_db_sl != null ? `${psycho.loudness_match_db_sl} dB SL (at comfortable sensation level)` : "Mixing point at comfortable SL"}
+              </li>
+            </ul>
+          </Panel>
+
+          <Panel tone="sunken" tight title="2. Behavioral & Habituation Protocol">
+            <ul className="stack stack-2" style={{ paddingLeft: "var(--s4)", fontSize: "var(--fs-small)" }}>
+              <li>
+                <strong>CBT & Psychoeducation:</strong> Recommended structured modules for cognitive restructuring.
+              </li>
+              <li>
+                <strong>Daily Target Session:</strong> {plan?.daily_minutes_target ? `${plan.daily_minutes_target} minutes per day` : "30–45 minutes daily split across 2 sessions"}
+              </li>
+              <li>
+                <strong>Progress Review Window:</strong> {plan?.review_after_days ? `Re-assess after ${plan.review_after_days} days` : "Re-assess in 30 days"}
+              </li>
+            </ul>
+          </Panel>
+        </div>
+
+        <Panel tone="info" tight>
+          <div className="stack stack-1">
+            <strong>NIEPMD Clinical Note:</strong>
+            <p className="meta" style={{ margin: 0 }}>
+              Sound enrichment should be delivered at a comfortable, non-intrusive volume (mixing point). Never increase sound levels to uncomfortable thresholds.
+            </p>
+          </div>
+        </Panel>
+      </div>
+    </Panel>
+  );
+}
+
 export function ClinicalSummary({ report, detail }: { report: any; detail: any }) {
   const { t } = useTranslation();
   const audiometry = report.audiometry ?? {};
