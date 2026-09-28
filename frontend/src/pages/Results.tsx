@@ -333,24 +333,16 @@ export default function Results() {
           </div>
 
           {resultFormat === "plain" ? (
-            <>
-              {/* Plain-Language Clinical Summary */}
+            <div className="fade-in">
+              {/* Plain-Language Clinical Summary - Ends immediately after "What happens next" */}
               <ClinicalSummary report={data} detail={detail} />
-              <TinnitusAssessmentDashboard
-                report={data}
-                activeAssessment={completed.find((a) => a.id === activeId) ?? null}
-                onCompleteInstrument={setCompletingKey}
-              />
-            </>
+            </div>
           ) : (
             <div className="stack stack-6 fade-in">
               {/* NIEPMD Suggested Guidelines */}
               <NiepmdSuggestedPanel report={data} detail={detail} />
-              
-              {/* Clinical Summary */}
-              <ClinicalSummary report={data} detail={detail} />
 
-              {/* Assessment Dashboard */}
+              {/* Assessment Dashboard - Starts with "Your tinnitus assessment results" */}
               <TinnitusAssessmentDashboard
                 report={data}
                 activeAssessment={completed.find((a) => a.id === activeId) ?? null}
