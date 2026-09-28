@@ -418,24 +418,29 @@ export interface PitchAFCTrial {
  * influenced by the patient or by chance.
  */
 export class PitchNarrower {
-  private lowOct: number;
-  private highOct: number;
+  private lowHz: number;
+  private highHz: number;
+  private initialLowHz: number;
   private trials: PitchAFCTrial[] = [];
   private notSureCount = 0;
   private phaseName: "coarse" | "fine" = "coarse";
 
-  static readonly MIN_COARSE_TRIALS = 3;
-  static readonly MAX_COARSE_TRIALS = 5;
-  static readonly MAX_FINE_TRIALS = 3;
-  static readonly COARSE_NARROW_FRACTION = 2 / 3;
-  static readonly FINE_NARROW_FRACTION = 1 / 2;
-  static readonly NOT_SURE_NUDGE_FRACTION = 1 / 6;
-  static readonly COARSE_TO_FINE_GAP_OCT = 1;
-  static readonly FINE_STOP_GAP_OCT = 1 / 12;
+  static readonly RATIO_B_TO_A = 1.50; // Sound B is 1.50x Sound A (e.g. 2400 Hz -> 3600 Hz)
+  static readonly STOP_SEMITONES = 1.0; // Stops once difference is <= 1 semitone
 
-  constructor(startLowHz = 1000, startHighHz = 8000) {
-    this.lowOct = Math.log2(startLowHz);
-    this.highOct = Math.log2(startHighHz);
+  constructor(startLowHz = 2400, startHighHz?: number) {
+    this.initialLowHz = PitchNarrower.snap(startLowHz);
+    this.lowHz = this.initialLowHz;
+    this.highHz = startHighHz !== undefined
+      ? PitchNarrower.snap(startHighHz)
+      : PitchNarrower.snap(this.lowHz * PitchNarrower.RATIO_B_TO_A);
+  }
+
+  /**
+   * Snaps a frequency to the nearest multiple of 30 Hz, guaranteeing divisibility by 10.
+   */
+  static snap(hz: number): number {
+    return Math.max(30, Math.round(hz / 30) * 30);
   }
 
   get trace(): PitchAFCTrial[] {
@@ -450,27 +455,36 @@ export class PitchNarrower {
     return this.phaseName;
   }
 
-  /** The pair to present right now: A is always the lower frequency. */
-  pair(): { aHz: number; bHz: number } {
-    return { aHz: Math.round(2 ** this.lowOct), bHz: Math.round(2 ** this.highOct) };
+  /** The pair to present right now: A is always the lower frequency. Both divisible by 10. */
+  pair(): { aHz: number; bHz: number; differenceSemitones: number } {
+    return {
+      aHz: this.lowHz,
+      bHz: this.highHz,
+      differenceSemitones: this.gapSemitones(),
+    };
   }
 
-  private gapOct(): number {
-    return this.highOct - this.lowOct;
+  gapOct(): number {
+    return Math.max(0, Math.log2(this.highHz / Math.max(1, this.lowHz)));
   }
 
-  private coarseCount(): number {
-    return this.trials.filter((t) => t.phase === "coarse").length;
+  gapSemitones(): number {
+    return Math.round(this.gapOct() * 12 * 10) / 10;
   }
 
-  /** Has the search reached its stopping point? */
+  /**
+   * Has the search reached its stopping point?
+   * Once the difference reaches 1 semitone (1/12 octave), stop immediately at that semitone.
+   */
   get done(): boolean {
-    if (this.phaseName !== "fine") return false;
-    const fineCount = this.trials.filter((t) => t.phase === "fine").length;
-    return fineCount >= PitchNarrower.MAX_FINE_TRIALS || this.gapOct() <= PitchNarrower.FINE_STOP_GAP_OCT;
+    return this.gapOct() * 12 <= PitchNarrower.STOP_SEMITONES + 1e-6;
   }
 
-  /** Record the patient's response for the current pair and narrow the bracket. */
+  /**
+   * Record the patient's response for the current pair and narrow the bracket.
+   * Deterministic bisection progression without random jumps.
+   * All frequencies remain strictly divisible by 10 and multiples of 30.
+   */
   choose(response: PitchAFCResponse): void {
     const { aHz, bHz } = this.pair();
     this.trials.push({
@@ -482,55 +496,49 @@ export class PitchNarrower {
       at: Date.now(),
     });
 
+    // Midpoint snapped to multiple of 30 (divisible by 10)
+    let midHz = PitchNarrower.snap((this.lowHz + this.highHz) / 2);
+    if (midHz <= this.lowHz && this.highHz - this.lowHz >= 60) {
+      midHz = this.lowHz + 30;
+    } else if (midHz >= this.highHz && this.highHz - this.lowHz >= 60) {
+      midHz = this.highHz - 30;
+    }
+
     if (response === "not_sure") {
       this.notSureCount++;
-      const nudge = this.gapOct() * PitchNarrower.NOT_SURE_NUDGE_FRACTION;
-      this.lowOct += nudge;
-      this.highOct -= nudge;
-    } else {
-      const k = this.phaseName === "coarse" ? PitchNarrower.COARSE_NARROW_FRACTION : PitchNarrower.FINE_NARROW_FRACTION;
-      if (response === "A") {
-        this.highOct = this.lowOct + this.gapOct() * (1 - k);
+      const step = Math.max(30, PitchNarrower.snap((this.highHz - this.lowHz) / 4));
+      if (this.highHz - this.lowHz > step * 2) {
+        this.lowHz += step;
+        this.highHz -= step;
       } else {
-        this.lowOct = this.highOct - this.gapOct() * (1 - k);
+        this.highHz = this.lowHz;
       }
+    } else if (response === "A") {
+      this.highHz = midHz;
+    } else {
+      this.lowHz = midHz;
     }
 
-    if (this.phaseName === "coarse") {
-      const coarseTrials = this.coarseCount();
-      if (
-        coarseTrials >= PitchNarrower.MIN_COARSE_TRIALS &&
-        (this.gapOct() <= PitchNarrower.COARSE_TO_FINE_GAP_OCT || coarseTrials >= PitchNarrower.MAX_COARSE_TRIALS)
-      ) {
-        this.phaseName = "fine";
-      }
+    // Phase transition: when bracket difference is within half-octave, designate as fine-tuning
+    if (this.gapOct() <= 0.5) {
+      this.phaseName = "fine";
     }
-  }
-
-  /** The matched frequency: the geometric mean of the final bracket. */
-  result(): number {
-    return Math.round(2 ** ((this.lowOct + this.highOct) / 2));
   }
 
   /**
-   * Reliability, on the same 0-1 scale and with the same weighting shape as
-   * the bracketing search this replaces, so downstream consumers that gate
-   * on it (the therapy engine's notch-placement threshold) keep behaving the
-   * same way. Components:
-   *
-   *  - **Tightness** — how narrow the final bracket is.
-   *  - **Stability** — how often the patient reversed direction (chose A then
-   *    B then A on adjoining decisive trials), from `reversalCount()`.
-   *  - **Completeness** — trial count relative to a typical full search.
-   *  - **Octave-check credit** — replaces the old test-retest credit: a
-   *    patient who confirms the matched pitch over its octave-doubled
-   *    alternative is giving the same kind of reliability evidence a
-   *    reproduced retest used to.
+   * The matched frequency: stopped at that exact semitone, snapped to multiple of 30 (divisible by 10).
+   */
+  result(): number {
+    return PitchNarrower.snap((this.lowHz + this.highHz) / 2);
+  }
+
+  /**
+   * Reliability score [0, 1] assessing tightness, stability, and completion.
    */
   confidence(octaveResponse: "matched" | "octave_higher" | "not_sure" | null): number {
-    const tightness = Math.max(0, 1 - this.gapOct() / 2.2);
+    const tightness = Math.max(0, 1 - this.gapOct() / 1.5);
     const stability = Math.max(0, 1 - this.reversalCount() / Math.max(1, this.trials.length - 1));
-    const completeness = Math.min(1, this.trials.length / 6);
+    const completeness = Math.min(1, this.trials.length / 5);
     const octaveCredit = octaveResponse === "matched" ? 0.25 : octaveResponse === "octave_higher" ? 0.15 : 0.1;
     const value = tightness * 0.35 + stability * 0.2 + completeness * 0.2 + octaveCredit;
     return Math.round(Math.min(1, Math.max(0, value)) * 100) / 100;
@@ -802,6 +810,10 @@ export class MaskingLevelFinder {
 
   get currentLevel(): number {
     return this.level;
+  }
+
+  setLevel(db: number): void {
+    this.level = Math.min(this.maxDb, Math.max(this.minDb, db));
   }
 
   get phase(): "coarse" | "fine" {

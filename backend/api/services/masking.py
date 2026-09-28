@@ -37,7 +37,7 @@ from clinical.audiometry import threshold_at
 # whatever was actually tested with this preset list, never just this list
 # alone — the same reason `masking_thresholds` has always been an open map
 # rather than a fixed-shape record.
-MASKING_FREQUENCIES: list[int] = [1000, 2000, 3000, 4000, 5000, 6000, 8000]
+MASKING_FREQUENCIES: list[int] = [250, 500, 1000, 2000, 3000, 4000, 6000, 8000]
 
 # Above this, a masker is loud enough to be a problem in its own right: it
 # approaches the level at which sound-induced discomfort and further hearing
